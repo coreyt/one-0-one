@@ -50,6 +50,7 @@ from src.session.event_bus import EventBus
 from src.session.events import (
     ChannelCreatedEvent,
     GameStateEvent,
+    IncidentEvent,
     MessageEvent,
     MonologueEvent,
     RuleViolationEvent,
@@ -93,6 +94,8 @@ class SessionEngine:
         self._resume_event = asyncio.Event()
         self._resume_event.set()
         self._state: SessionState | None = None
+        # Track private channel IDs already announced via CHANNEL_CREATED events
+        self._announced_channels: set[str] = set()
         # Attach transcript writer to every event
         self._bus.stream().subscribe(self._transcript.record)
 
@@ -170,6 +173,7 @@ class SessionEngine:
         )
         self._bus.emit(public_event)
         state.events.append(public_event)
+        self._announced_channels.add("public")
 
         # Emit configured team/private channels
         for ch in self._config.channels:
@@ -182,6 +186,7 @@ class SessionEngine:
             )
             self._bus.emit(event)
             state.events.append(event)
+            self._announced_channels.add(ch.id)
 
     # ------------------------------------------------------------------
     # Main loop
@@ -346,7 +351,7 @@ class SessionEngine:
             )
         except ProviderError as exc:
             error_str = str(exc).lower()
-            incident_type = "timeout" if "timeout" in error_str else "error"
+            incident_type = "timeout" if ("timeout" in error_str or "timed out" in error_str) else "error"
             log.error(
                 "llm.error",
                 agent_id=agent_id,
@@ -359,6 +364,18 @@ class SessionEngine:
                 "model": f"{agent_config.provider}/{agent_config.model}",
                 "type": incident_type,
             })
+            incident_event = IncidentEvent(
+                timestamp=datetime.now(UTC),
+                turn_number=state.turn_number,
+                session_id=self._session_id,
+                agent_id=agent_id,
+                agent_name=agent_config.name,
+                model=f"{agent_config.provider}/{agent_config.model}",
+                incident_type=incident_type,
+                detail=str(exc),
+            )
+            self._bus.emit(incident_event)
+            state.events.append(incident_event)
             agent_state.status = "idle"
             return
 
@@ -441,6 +458,18 @@ class SessionEngine:
                 parsed.private_to,  # fallback: use the name as-is
             )
             private_channel_id = f"private_{agent_id}_{recipient_id}"
+            # Announce the channel the first time it is used
+            if private_channel_id not in self._announced_channels:
+                ch_event = ChannelCreatedEvent(
+                    timestamp=now,
+                    session_id=self._session_id,
+                    channel_id=private_channel_id,
+                    channel_type="private",
+                    members=[agent_id, recipient_id],
+                )
+                self._bus.emit(ch_event)
+                state.events.append(ch_event)
+                self._announced_channels.add(private_channel_id)
             priv_event = MessageEvent(
                 timestamp=now,
                 turn_number=state.turn_number,

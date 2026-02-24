@@ -127,6 +127,24 @@ class SessionEndEvent(BaseModel):
     message: str | None = None  # optional human-readable summary
 
 
+class IncidentEvent(BaseModel):
+    """A provider error or timeout occurred during an agent turn.
+
+    Emitted in addition to storing the incident in GameState.incidents.
+    Allows UI layers to surface real-time error banners without polling state.
+    """
+
+    type: Literal["INCIDENT"] = "INCIDENT"
+    timestamp: datetime
+    turn_number: int
+    session_id: str
+    agent_id: str
+    agent_name: str
+    model: str
+    incident_type: Literal["timeout", "error"]
+    detail: str  # error message (may be long; UIs should truncate for display)
+
+
 # ---------------------------------------------------------------------------
 # Discriminated union — the single type used everywhere in the codebase
 # ---------------------------------------------------------------------------
@@ -138,6 +156,7 @@ SessionEvent = Annotated[
     | GameStateEvent
     | RuleViolationEvent
     | ChannelCreatedEvent
-    | SessionEndEvent,
+    | SessionEndEvent
+    | IncidentEvent,
     Field(discriminator="type"),
 ]

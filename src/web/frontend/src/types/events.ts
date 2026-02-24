@@ -58,6 +58,16 @@ export interface ChannelCreatedEvent {
 export interface SessionEndEvent extends BaseEvent {
   type: 'SESSION_END';
   reason: 'max_turns' | 'win_condition' | 'completion_signal' | 'user_ended' | 'error';
+  message?: string;
+}
+
+export interface IncidentEvent extends BaseEvent {
+  type: 'INCIDENT';
+  agent_id: string;
+  agent_name: string;
+  model: string;
+  incident_type: 'timeout' | 'error';
+  detail: string;
 }
 
 export type SessionEvent =
@@ -67,4 +77,5 @@ export type SessionEvent =
   | GameStateEvent
   | RuleViolationEvent
   | ChannelCreatedEvent
-  | SessionEndEvent;
+  | SessionEndEvent
+  | IncidentEvent;

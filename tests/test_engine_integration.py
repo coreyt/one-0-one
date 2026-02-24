@@ -6,7 +6,7 @@ LiteLLMClient. No real LLM calls are made.
 
 Covers:
     - Full session lifecycle: SESSION_CREATED → turns → SESSION_END
-    - All 7 event types emitted in the correct order
+    - All 8 event types emitted in the correct order
     - Public / team / private message routing
     - Monologue event emission
     - GameState updates propagated to bus
@@ -586,3 +586,88 @@ class TestProviderErrors:
         # With the fix: turn 0 is retried after timeout → 3 successful turns = 3 messages.
         assert len(public_msgs) == 3
         assert len(state.game_state.incidents) == 1
+
+    async def test_incident_event_emitted_on_provider_error(self):
+        """IncidentEvent is emitted to the bus when a provider call fails."""
+        from src.providers import ProviderError
+
+        config = _make_config(
+            max_turns=2,
+            agents=[{"id": "a", "name": "Alice", "provider": "anthropic",
+                     "model": "claude-sonnet-4-6", "role": "participant"}],
+        )
+        bus = EventBus()
+        events = _setup_event_capture(bus)
+
+        with patch("src.session.engine.LiteLLMClient") as MockClient:
+            MockClient.return_value.complete = AsyncMock(
+                side_effect=[
+                    ProviderError("Connection timed out", provider="anthropic", model="claude-sonnet-4-6"),
+                    _make_result("hello"),
+                    _make_result("world"),
+                ]
+            )
+            with patch("src.session.engine.TranscriptWriter") as MockWriter:
+                MockWriter.return_value.record = MagicMock()
+                MockWriter.return_value.flush = AsyncMock()
+                engine = SessionEngine(config, bus)
+                await engine.run()
+
+        incident_events = [e for e in events if e.type == "INCIDENT"]
+        assert len(incident_events) == 1
+        inc = incident_events[0]
+        assert inc.agent_id == "a"
+        assert inc.agent_name == "Alice"
+        assert inc.incident_type == "timeout"
+        assert "timed out" in inc.detail.lower()
+
+
+# ---------------------------------------------------------------------------
+# Private channel auto-creation
+# ---------------------------------------------------------------------------
+
+class TestPrivateChannelCreation:
+    async def test_channel_created_emitted_for_private_message(self):
+        """When an agent sends a private message, CHANNEL_CREATED fires for that channel."""
+        config = _make_config(max_turns=1)
+        bus = EventBus()
+        events = _setup_event_capture(bus)
+
+        with patch("src.session.engine.LiteLLMClient") as MockClient:
+            MockClient.return_value.complete = AsyncMock(
+                return_value=_make_result('<private to="Bob">Hey Bob.</private>')
+            )
+            with patch("src.session.engine.TranscriptWriter") as MockWriter:
+                MockWriter.return_value.record = MagicMock()
+                MockWriter.return_value.flush = AsyncMock()
+                engine = SessionEngine(config, bus)
+                await engine.run()
+
+        ch_events = [e for e in events if e.type == "CHANNEL_CREATED"]
+        private_ch = [e for e in ch_events if e.channel_type == "private"]
+        assert len(private_ch) >= 1
+        ch = private_ch[0]
+        assert "a" in ch.members or "b" in ch.members
+        assert ch.channel_id.startswith("private_")
+
+    async def test_channel_created_only_once_per_private_pair(self):
+        """Sending multiple private messages on the same channel only emits CHANNEL_CREATED once."""
+        config = _make_config(max_turns=2)
+        bus = EventBus()
+        events = _setup_event_capture(bus)
+
+        with patch("src.session.engine.LiteLLMClient") as MockClient:
+            MockClient.return_value.complete = AsyncMock(
+                return_value=_make_result('<private to="Bob">Hey.</private>')
+            )
+            with patch("src.session.engine.TranscriptWriter") as MockWriter:
+                MockWriter.return_value.record = MagicMock()
+                MockWriter.return_value.flush = AsyncMock()
+                engine = SessionEngine(config, bus)
+                await engine.run()
+
+        ch_events = [e for e in events if e.type == "CHANNEL_CREATED"]
+        private_ch = [e for e in ch_events if e.channel_type == "private"]
+        # Regardless of how many turns produced private messages, each unique channel fires once
+        channel_ids = [e.channel_id for e in private_ch]
+        assert len(channel_ids) == len(set(channel_ids))
