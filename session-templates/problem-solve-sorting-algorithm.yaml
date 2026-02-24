@@ -1,0 +1,52 @@
+title: "Algorithm Design: Novel Sorting Approach"
+description: "A team of AI agents collaborates to design, critique, and refine a novel sorting algorithm optimized for nearly-sorted data."
+type: problem-solve
+
+setting: algorithm_development
+topic: "Design a sorting algorithm optimized for nearly-sorted data (<=5% elements out of place). Analyze time/space complexity and compare to Timsort."
+
+orchestrator:
+  type: python
+  module: basic
+
+agents:
+  - id: architect
+    name: "Arch"
+    provider: anthropic
+    model: claude-sonnet-4-6
+    role: architect
+    persona: "Proposes initial algorithm designs and high-level approaches, thinks in terms of data structures and invariants."
+
+  - id: implementer
+    name: "Dev"
+    provider: openai
+    model: gpt-4o
+    role: implementer
+    persona: "Translates designs into concrete pseudocode and Python implementations. Focuses on correctness and clarity."
+
+  - id: analyst
+    name: "Perf"
+    provider: google
+    model: gemini-2.0-flash
+    role: analyst
+    persona: "Analyzes time and space complexity, identifies edge cases, and benchmarks approaches."
+
+  - id: reviewer
+    name: "Review"
+    provider: mistral
+    model: mistral-large-latest
+    role: reviewer
+    persona: "Code-reviews implementations, challenges assumptions, and suggests improvements."
+
+hitl:
+  enabled: true
+  role: participant
+
+turn_order: round-robin
+concurrency: sequential
+max_turns: 24
+
+transcript:
+  auto_save: true
+  format: markdown
+  path: ./sessions/

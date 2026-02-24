@@ -1,0 +1,47 @@
+title: "Task: Write a Project README"
+description: "Agents collaborate to produce a polished README.md for a software project. One agent drafts, another critiques, a third edits."
+type: task-completion
+
+setting: task_completion
+topic: "Write a comprehensive README.md for a Python CLI tool called 'dataweave' that merges and transforms CSV/JSON files."
+
+orchestrator:
+  type: python
+  module: basic
+
+agents:
+  - id: drafter
+    name: "Draft"
+    provider: anthropic
+    model: claude-sonnet-4-6
+    role: drafter
+    persona: "Writes the initial README draft, focusing on clarity, completeness, and developer experience."
+
+  - id: critic
+    name: "Critic"
+    provider: openai
+    model: gpt-4o
+    role: critic
+    persona: "Reviews the draft for gaps, ambiguity, incorrect assumptions, and missing sections."
+
+  - id: editor
+    name: "Edit"
+    provider: google
+    model: gemini-2.0-flash
+    role: editor
+    persona: "Takes the critiqued draft and produces a polished final version with consistent formatting and tone."
+
+hitl:
+  enabled: true
+  role: stakeholder
+
+turn_order: orchestrator
+concurrency: sequential
+max_turns: 9
+
+completion_signal: "The editor has produced a final README that all agents agree is complete."
+
+transcript:
+  auto_save: true
+  format: markdown
+  path: ./sessions/

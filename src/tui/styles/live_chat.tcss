@@ -1,0 +1,81 @@
+/* ====================================================================
+   LiveChatScreen styles
+   ==================================================================== */
+
+/* ── ChannelTabs ─────────────────────────────────────────────────── */
+ChannelTabs {
+    height: 1fr;
+    layout: vertical;
+}
+
+ChannelTabs > Tabs {
+    height: 3;
+}
+
+ChannelTabs > RichLog {
+    height: 1fr;
+    padding: 0 1;
+}
+
+/* ── MonologuePanel ──────────────────────────────────────────────── */
+MonologuePanel {
+    height: 0;
+    border-top: solid $monologue-border;
+    background: $monologue-bg;
+}
+
+MonologuePanel.open {
+    height: 8;
+}
+
+#mono-header {
+    color: $monologue-text;
+    text-style: italic;
+    padding: 0 1;
+}
+
+#mono-log {
+    height: 1fr;
+    padding: 0 1;
+    color: $monologue-text;
+}
+
+/* ── HITLInputBar ────────────────────────────────────────────────── */
+HITLInputBar {
+    display: none;
+    height: 3;
+    layout: horizontal;
+    border-top: solid $accent;
+}
+
+HITLInputBar > Select {
+    width: 16;
+}
+
+HITLInputBar > Input {
+    width: 1fr;
+}
+
+HITLInputBar > Button {
+    width: 8;
+}
+
+/* ── Sidebar ─────────────────────────────────────────────────────── */
+TurnIndicator {
+    height: auto;
+    padding: 1;
+    border-bottom: solid $panel;
+}
+
+#turn-label {
+    text-style: bold;
+}
+
+#spinner {
+    display: none;
+}
+
+AgentRoster {
+    height: 1fr;
+    padding: 1 0;
+}

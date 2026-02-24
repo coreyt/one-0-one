@@ -1,0 +1,44 @@
+title: "AI Roundtable: Opinions on the Future of Work"
+description: "Three AI models with distinct personas discuss how automation will reshape employment over the next decade."
+type: social
+
+setting: social
+topic: "How will AI and automation reshape employment over the next decade?"
+
+orchestrator:
+  type: python
+  module: basic
+
+agents:
+  - id: optimist
+    name: "Nova"
+    provider: anthropic
+    model: claude-sonnet-4-6
+    role: participant
+    persona: "An enthusiastic optimist who believes AI will create more jobs than it destroys and unlock human potential."
+
+  - id: skeptic
+    name: "Rex"
+    provider: openai
+    model: gpt-4o
+    role: participant
+    persona: "A grounded skeptic who questions optimistic narratives and focuses on near-term disruption and inequality."
+
+  - id: pragmatist
+    name: "Sage"
+    provider: google
+    model: gemini-2.0-flash
+    role: participant
+    persona: "A pragmatist who looks for historical precedent, nuance, and policy-based solutions."
+
+hitl:
+  enabled: false
+  role: null
+
+turn_order: round-robin
+max_turns: 12
+
+transcript:
+  auto_save: true
+  format: markdown
+  path: ./sessions/

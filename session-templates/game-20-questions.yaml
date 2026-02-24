@@ -1,0 +1,61 @@
+title: "20 Questions"
+description: "Classic 20 Questions — one agent secretly picks a person, place, or thing; the others ask yes/no questions to guess it."
+type: games
+topic: "Play a game of 20 Questions."
+
+setting: game
+game:
+  name: "20 Questions"
+  rules:
+    - "The thinker secretly selects a person, place, or thing at the start."
+    - "Guessers may only ask yes/no questions."
+    - "The thinker may only answer Yes, No, or Partly."
+    - "Guessers have a maximum of 20 questions total (shared pool)."
+    - "A guesser may make one direct guess per turn instead of a question. A correct guess wins."
+    - "If 20 questions are exhausted without a correct guess, the thinker wins and reveals the answer."
+  how_to_play: >
+    The thinker agent starts by silently choosing a subject and announcing only the category
+    (animal, vegetable, or mineral — or person/place/thing). Guessers then take turns asking
+    yes/no questions to narrow down the answer. The orchestrator tracks question count and
+    validates that questions are yes/no format.
+  turn_order: round-robin
+  win_condition: "A guesser correctly identifies the subject within 20 questions."
+  hitl_compatible: true
+  max_rounds: 20
+
+max_turns: 63
+
+orchestrator:
+  type: python
+  module: basic
+
+agents:
+  - id: thinker
+    name: "Sphinx"
+    provider: anthropic
+    model: claude-sonnet-4-6
+    role: thinker
+    persona: "Picks an interesting subject and answers questions honestly but without giving anything away."
+
+  - id: guesser_1
+    name: "Sherlock"
+    provider: openai
+    model: gpt-4o
+    role: guesser
+    persona: "A methodical guesser who uses binary elimination strategies."
+
+  - id: guesser_2
+    name: "Watson"
+    provider: gemini
+    model: gemini-2.5-flash
+    role: guesser
+    persona: "A creative guesser who follows intuition and lateral thinking."
+
+hitl:
+  enabled: false
+  role: null
+
+transcript:
+  auto_save: true
+  format: markdown
+  path: ./sessions/

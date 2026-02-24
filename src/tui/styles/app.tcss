@@ -1,0 +1,42 @@
+/* ====================================================================
+   one-0-one — global design tokens + layout
+   ==================================================================== */
+
+/* ── Agent colour palette ─────────────────────────────────────────── */
+$agent-0: #4fc3f7;
+$agent-1: #81c784;
+$agent-2: #ffb74d;
+$agent-3: #f06292;
+$agent-4: #ba68c8;
+$agent-5: #4db6ac;
+
+$hitl-color: white;
+$orchestrator-color: #9e9e9e;
+
+$monologue-bg: #1a2a2f;
+$monologue-border: #546e7a;
+$monologue-text: #90a4ae;
+
+$private-bg: #2a1f1a;
+$private-border: #8d6e63;
+
+/* ── Focus visibility — required on every focusable widget ────────── */
+*:focus {
+    border: tall $accent;
+}
+
+/* ── LiveChatScreen top-level layout ─────────────────────────────── */
+LiveChatScreen {
+    layout: horizontal;
+}
+
+#main-column {
+    width: 1fr;
+    layout: vertical;
+}
+
+#sidebar {
+    width: 24;
+    layout: vertical;
+    border-left: solid $panel;
+}

@@ -1,0 +1,54 @@
+title: "Research Panel: Effective Climate Policy Mechanisms"
+description: "A multi-model research panel analyzes and synthesizes evidence on the most effective policy levers for reducing carbon emissions."
+type: research
+
+setting: research
+topic: "What are the most evidence-backed policy mechanisms for reducing carbon emissions at scale?"
+
+orchestrator:
+  type: llm
+  provider: anthropic
+  model: claude-opus-4-6
+  persona: "A senior research director who ensures balanced coverage, calls on specific agents for their expertise, and synthesizes findings into a final report."
+
+agents:
+  - id: domain_expert
+    name: "Dr. Ellis"
+    provider: anthropic
+    model: claude-sonnet-4-6
+    role: domain_expert
+    persona: "A climate policy expert focused on empirical evidence and peer-reviewed research."
+
+  - id: economist
+    name: "Prof. Chen"
+    provider: openai
+    model: gpt-4o
+    role: analyst
+    persona: "An economist who evaluates cost-effectiveness, market mechanisms, and second-order effects."
+
+  - id: skeptic
+    name: "Critic"
+    provider: mistral
+    model: mistral-large-latest
+    role: skeptic
+    persona: "A rigorous skeptic who challenges assumptions, flags weak evidence, and steelmans opposing views."
+
+  - id: synthesizer
+    name: "Memo"
+    provider: google
+    model: gemini-2.0-flash
+    role: synthesizer
+    persona: "Listens to all perspectives and drafts a balanced, structured summary of the panel's findings."
+
+hitl:
+  enabled: true
+  role: moderator
+
+turn_order: orchestrator
+concurrency: parallel_subtasks
+max_turns: 20
+
+transcript:
+  auto_save: true
+  format: markdown
+  path: ./sessions/

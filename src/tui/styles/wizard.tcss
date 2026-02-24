@@ -1,0 +1,33 @@
+/* ====================================================================
+   SetupWizardScreen styles
+   ==================================================================== */
+
+SetupWizardScreen {
+    layout: vertical;
+}
+
+#wizard-tabs {
+    height: 3;
+}
+
+#wizard-content {
+    height: 1fr;
+    padding: 1 2;
+}
+
+.field-error {
+    color: $error;
+    text-style: italic;
+}
+
+.field-label {
+    margin-top: 1;
+    text-style: bold;
+}
+
+#wizard-footer {
+    height: 3;
+    dock: bottom;
+    padding: 0 1;
+    border-top: solid $panel;
+}

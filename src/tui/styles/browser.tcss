@@ -1,0 +1,20 @@
+/* ====================================================================
+   SessionBrowserScreen styles
+   ==================================================================== */
+
+SessionBrowserScreen {
+    layout: vertical;
+}
+
+#template-list {
+    height: 1fr;
+}
+
+.template-title {
+    text-style: bold;
+}
+
+.template-type-badge {
+    color: $accent;
+    text-style: italic;
+}
