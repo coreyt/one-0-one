@@ -10,14 +10,14 @@ SetupWizardScreen {
     height: 3;
 }
 
-#wizard-content {
+#topic-pane,
+#setting-pane,
+#agents-pane,
+#orchestrator-pane,
+#hitl-pane {
     height: 1fr;
     padding: 1 2;
-}
-
-.field-error {
-    color: $error;
-    text-style: italic;
+    overflow-y: auto;
 }
 
 .field-label {
@@ -25,9 +25,59 @@ SetupWizardScreen {
     text-style: bold;
 }
 
-#wizard-footer {
+.field-error {
+    color: $error;
+    text-style: italic;
+}
+
+.section-header {
+    margin-top: 2;
+    text-style: bold underline;
+    color: $accent;
+}
+
+#validation-error {
+    height: auto;
+    min-height: 1;
+    padding: 0 2;
+}
+
+/* Agent tab */
+#agents-table {
+    height: 12;
+    margin-bottom: 1;
+}
+
+#agent-buttons {
     height: 3;
-    dock: bottom;
-    padding: 0 1;
+}
+
+#agent-buttons Button {
+    margin-right: 1;
+}
+
+/* Orchestrator conditional sections */
+#orch-python-section,
+#orch-llm-section {
+    padding: 0;
+}
+
+/* Game config section */
+#game-config-section {
+    padding: 0;
     border-top: solid $panel;
+    margin-top: 1;
+}
+
+/* Advanced / transcript sections */
+#advanced-section,
+#transcript-section {
+    padding: 0;
+    border-top: solid $panel;
+    margin-top: 1;
+}
+
+/* HITL settings section */
+#hitl-settings-section {
+    padding: 0;
 }

@@ -103,6 +103,7 @@ class LiteLLMClient:
         temperature: float = 0.7,
         native_thinking: bool = False,
         thinking_budget_tokens: int = 8000,
+        timeout: int = 30,
         **kwargs: Any,
     ) -> CompletionResult:
         """
@@ -157,7 +158,7 @@ class LiteLLMClient:
                 call_kwargs["extra_body"] = extra_body
             if self._router_url:
                 call_kwargs["api_base"] = self._router_url
-            response = await litellm.acompletion(**call_kwargs, timeout=30)
+            response = await litellm.acompletion(**call_kwargs, timeout=timeout)
         except litellm.exceptions.AuthenticationError as exc:
             raise ProviderError(
                 f"Authentication failed for {model}: {exc}",

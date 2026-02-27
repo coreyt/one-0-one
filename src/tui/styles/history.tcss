@@ -1,32 +1,24 @@
 /* ====================================================================
-   SessionBrowserScreen styles
+   SessionHistoryScreen styles
    ==================================================================== */
 
-SessionBrowserScreen {
+SessionHistoryScreen {
     layout: vertical;
 }
 
-#browser-split {
+#history-split {
     height: 1fr;
 }
 
-#template-list {
+#history-list {
     width: 1fr;
     max-width: 50;
     min-width: 30;
     border-right: solid $panel;
 }
 
-#detail-panel {
+#transcript-view {
     width: 2fr;
     padding: 1 2;
-}
-
-.template-title {
-    text-style: bold;
-}
-
-.template-type-badge {
-    color: $accent;
-    text-style: italic;
+    scrollbar-size: 1 1;
 }

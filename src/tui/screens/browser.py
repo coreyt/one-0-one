@@ -5,19 +5,21 @@ from __future__ import annotations
 from pathlib import Path
 
 from textual.app import ComposeResult
+from textual.containers import Horizontal
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Label, ListItem, ListView, Tab, Tabs
 
 from src.session.config import SessionConfig, load_session_config
 from src.settings import settings
+from src.tui.widgets.detail_panel import TemplateDetailPanel
 
 
 _TYPE_FILTERS = ["All", "Games", "Social", "Research", "Task", "Problem-Solve"]
 _TYPE_MAP = {
-    "Games": "game",
+    "Games": "games",
     "Social": "social",
     "Research": "research",
-    "Task": "task",
+    "Task": "task-completion",
     "Problem-Solve": "problem-solve",
 }
 
@@ -47,6 +49,7 @@ class SessionBrowserScreen(Screen):
     BINDINGS = [
         ("enter", "launch", "Launch"),
         ("n", "new_session", "New"),
+        ("h", "open_history", "History"),
         ("q", "quit_app", "Quit"),
     ]
 
@@ -60,7 +63,9 @@ class SessionBrowserScreen(Screen):
         with Tabs(id="type-filter"):
             for f in _TYPE_FILTERS:
                 yield Tab(f, id=f"filter_{f.lower().replace('-', '_')}")
-        yield ListView(id="template-list")
+        with Horizontal(id="browser-split"):
+            yield ListView(id="template-list")
+            yield TemplateDetailPanel(id="detail-panel")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -79,6 +84,14 @@ class SessionBrowserScreen(Screen):
         self._active_filter = label
         self._populate_list()
 
+    def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
+        """Update detail panel when a template is highlighted."""
+        panel = self.query_one("#detail-panel", TemplateDetailPanel)
+        if event.item is not None and isinstance(event.item, TemplateItem):
+            panel.show_config(event.item.config)
+        else:
+            panel.show_config(None)
+
     def action_launch(self) -> None:
         lv = self.query_one(ListView)
         highlighted = lv.highlighted_child
@@ -90,6 +103,10 @@ class SessionBrowserScreen(Screen):
     def action_new_session(self) -> None:
         from src.tui.screens.wizard import SetupWizardScreen
         self.app.push_screen(SetupWizardScreen())
+
+    def action_open_history(self) -> None:
+        from src.tui.screens.history import SessionHistoryScreen
+        self.app.push_screen(SessionHistoryScreen())
 
     def action_quit_app(self) -> None:
         self.app.action_quit()
@@ -125,4 +142,4 @@ class SessionBrowserScreen(Screen):
         if self._active_filter == "All":
             return True
         expected_type = _TYPE_MAP.get(self._active_filter, "")
-        return (config.setting or "").lower() == expected_type
+        return config.type == expected_type

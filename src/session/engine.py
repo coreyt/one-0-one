@@ -343,11 +343,16 @@ class SessionEngine:
             and agent_config.monologue_mode == "native"
         )
 
+        llm = self._config.llm_defaults
         try:
             result = await self._provider.complete(
                 model=f"{agent_config.provider}/{agent_config.model}",
                 messages=messages,
+                temperature=llm.temperature,
                 native_thinking=native_thinking,
+                thinking_budget_tokens=llm.thinking_budget,
+                timeout=llm.timeout,
+                **({"max_tokens": llm.max_tokens} if llm.max_tokens else {}),
             )
         except ProviderError as exc:
             error_str = str(exc).lower()

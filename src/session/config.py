@@ -86,6 +86,14 @@ class GameRole(BaseModel):
     description: str
 
 
+class LLMDefaults(BaseModel):
+    """Session-level LLM defaults. Per-agent overrides planned for later."""
+    temperature: float = 0.7
+    max_tokens: int | None = None
+    thinking_budget: int = 8000
+    timeout: int = 30
+
+
 class GameConfig(BaseModel):
     name: str
     description: str = ""
@@ -118,6 +126,7 @@ class SessionConfig(BaseModel):
     channels: list[ChannelConfig] = Field(default_factory=list)
     hitl: HITLConfig = Field(default_factory=HITLConfig)
     transcript: TranscriptConfig = Field(default_factory=TranscriptConfig)
+    llm_defaults: LLMDefaults = Field(default_factory=LLMDefaults)
     max_turns: int | None = None
     completion_signal: str | None = None
     game: GameConfig | None = None
