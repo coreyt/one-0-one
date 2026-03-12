@@ -17,11 +17,11 @@ class ChannelTabs(Widget):
         super().__init__(**kwargs)
         self._channels: list[str] = ["public"]
         self._unread: dict[str, int] = {}
+        self._labels: dict[str, str] = {"public": "Public"}
         self._active: str = "public"
 
     def compose(self) -> ComposeResult:
-        with Tabs(id="channel-tabs"):
-            yield Tab("Public", id="tab_public")
+        yield Tabs(Tab("Public", id="tab_public"), id="channel-tabs")
         yield RichLog(id="log_public", highlight=True, markup=True)
 
     def add_channel(self, event: ChannelCreatedEvent) -> None:
@@ -30,7 +30,8 @@ class ChannelTabs(Widget):
         if ch_id == "public" or ch_id in self._channels:
             return
         self._channels.append(ch_id)
-        label = self._tab_label(ch_id, event.channel_type)
+        label = self._make_label(ch_id, event.channel_type, event.members)
+        self._labels[ch_id] = label
         tabs = self.query_one(Tabs)
         tabs.add_tab(Tab(label, id=f"tab_{ch_id}"))
         log = RichLog(id=f"log_{ch_id}", highlight=True, markup=True)
@@ -74,36 +75,32 @@ class ChannelTabs(Widget):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _tab_label(ch_id: str, ch_type: str = "public") -> str:
+    def _make_label(
+        ch_id: str, ch_type: str, members: list[str] | None = None,
+    ) -> str:
         if ch_id == "public":
             return "Public"
         if ch_type == "team":
             name = ch_id.removeprefix("team_").replace("_", " ").title()
             return f"Team: {name}"
         if ch_type == "private":
+            if members and len(members) == 2:
+                a = members[0].replace("_", " ").title()
+                b = members[1].replace("_", " ").title()
+                return f"{a} \u2192 {b}"
             return "Private"
         return ch_id.replace("_", " ").title()
 
     def _refresh_tab_label(self, ch_id: str) -> None:
         tabs = self.query_one(Tabs)
         unread = self._unread.get(ch_id, 0)
-        base = self._get_base_label(ch_id)
+        base = self._labels.get(ch_id, ch_id)
         label = f"{base} [{unread}]" if unread > 0 else base
         try:
             tab = tabs.query_one(f"#tab_{ch_id}", Tab)
             tab.label = label
         except Exception:
             pass
-
-    def _get_base_label(self, ch_id: str) -> str:
-        if ch_id == "public":
-            return "Public"
-        if ch_id.startswith("team_"):
-            name = ch_id.removeprefix("team_").replace("_", " ").title()
-            return f"Team: {name}"
-        if ch_id.startswith("private_"):
-            return "Private"
-        return ch_id.replace("_", " ").title()
 
     @staticmethod
     def _format_message(event: MessageEvent) -> str:
@@ -113,7 +110,7 @@ class ChannelTabs(Widget):
         name_part = f"[bold]{event.agent_name}[/bold]"
         if is_private:
             recipient = event.recipient_id or ""
-            name_part = f"[dim]🔒 {event.agent_name} → {recipient}[/dim]"
+            name_part = f"[dim]\U0001f512 {event.agent_name} \u2192 {recipient}[/dim]"
 
         parallel_badge = " [dim]\\[parallel][/dim]" if is_parallel else ""
 

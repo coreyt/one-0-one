@@ -69,6 +69,9 @@ class OrchestratorOutput:
     advance_turns: int = 1
     """How many turn slots this output consumes. Equals len(next_agents) for batched turns."""
 
+    wait_for_hitl: bool = False
+    """When True, the engine pauses until a HITL message is injected."""
+
 
 # ---------------------------------------------------------------------------
 # Protocol

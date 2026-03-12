@@ -374,9 +374,14 @@ class TestAssignRandomPersonalities:
         assign_random_personalities(config, seed=42)
         assert [a.personality_id for a in config.agents] == original_ids
 
-    def test_too_many_agents_raises(self, tmp_path):
+    def test_too_many_agents_assigns_partial(self):
         load_roster.cache_clear()
         # 43 agents (villager) but only 42 profiles total (29 non-moderator-tagged)
         config = _make_session_config([f"agent_{i}" for i in range(43)])
-        with pytest.raises(ValueError, match="Not enough personality profiles"):
-            assign_random_personalities(config, seed=1)
+        result = assign_random_personalities(config, seed=1)
+        assigned = [a for a in result.agents if a.personality_id]
+        unassigned = [a for a in result.agents if not a.personality_id]
+        # Should assign as many as possible, not fail
+        assert len(assigned) > 0
+        assert len(unassigned) > 0
+        assert len(assigned) + len(unassigned) == len(result.agents)

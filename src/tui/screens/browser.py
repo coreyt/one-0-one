@@ -92,11 +92,16 @@ class SessionBrowserScreen(Screen):
         else:
             panel.show_config(None)
 
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        """Launch the selected template (Enter on ListView)."""
+        if isinstance(event.item, TemplateItem):
+            from src.tui.screens.live_chat import LiveChatScreen
+            self.app.push_screen(LiveChatScreen(event.item.config))
+
     def action_launch(self) -> None:
         lv = self.query_one(ListView)
         highlighted = lv.highlighted_child
         if highlighted is not None and isinstance(highlighted, TemplateItem):
-            # Import here to avoid circular; LiveChatScreen imported lazily
             from src.tui.screens.live_chat import LiveChatScreen
             self.app.push_screen(LiveChatScreen(highlighted.config))
 

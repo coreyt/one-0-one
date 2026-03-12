@@ -10,15 +10,6 @@ $agent-3: #f06292;
 $agent-4: #ba68c8;
 $agent-5: #4db6ac;
 
-$hitl-color: white;
-$orchestrator-color: #9e9e9e;
-
-$monologue-bg: #1a2a2f;
-$monologue-border: #546e7a;
-$monologue-text: #90a4ae;
-
-$private-bg: #2a1f1a;
-$private-border: #8d6e63;
 
 /* ── Focus visibility — required on every focusable widget ────────── */
 *:focus {

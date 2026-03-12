@@ -239,14 +239,19 @@ class TestChannelTabs:
         assert "parallel" in rendered.lower()
 
     def test_tab_label_public(self):
-        assert ChannelTabs._tab_label("public") == "Public"
+        assert ChannelTabs._make_label("public", "public") == "Public"
 
     def test_tab_label_team(self):
-        label = ChannelTabs._tab_label("team_red", "team")
+        label = ChannelTabs._make_label("team_red", "team")
         assert "Red" in label or "red" in label.lower()
 
-    def test_tab_label_private(self):
-        label = ChannelTabs._tab_label("private_ab", "private")
+    def test_tab_label_private_with_members(self):
+        label = ChannelTabs._make_label("private_a_b", "private", ["echo", "ripple"])
+        assert "Echo" in label
+        assert "Ripple" in label
+
+    def test_tab_label_private_no_members(self):
+        label = ChannelTabs._make_label("private_ab", "private")
         assert label == "Private"
 
 
@@ -527,7 +532,6 @@ class TestHITLInputBar:
             await pilot.pause()
 
             assert inp.value == ""
-            assert bar.display is False
 
     async def test_empty_text_does_not_submit(self):
         """Clicking send with empty input should not post a message."""

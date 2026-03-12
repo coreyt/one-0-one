@@ -20,8 +20,8 @@ ChannelTabs > RichLog {
 /* ── MonologuePanel ──────────────────────────────────────────────── */
 MonologuePanel {
     height: 0;
-    border-top: solid $monologue-border;
-    background: $monologue-bg;
+    border-top: solid #546e7a;
+    background: #1a2a2f;
 }
 
 MonologuePanel.open {
@@ -29,7 +29,7 @@ MonologuePanel.open {
 }
 
 #mono-header {
-    color: $monologue-text;
+    color: #90a4ae;
     text-style: italic;
     padding: 0 1;
 }
@@ -37,7 +37,7 @@ MonologuePanel.open {
 #mono-log {
     height: 1fr;
     padding: 0 1;
-    color: $monologue-text;
+    color: #90a4ae;
 }
 
 /* ── HITLInputBar ────────────────────────────────────────────────── */

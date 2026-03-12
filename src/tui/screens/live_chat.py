@@ -58,6 +58,10 @@ class LiveChatScreen(Screen):
         # Populate the agent roster immediately
         roster = self.query_one(AgentRoster)
         roster.populate(self._config.agents)
+        # Enable HITL input bar if configured
+        if self._config.hitl.enabled:
+            hitl_bar = self.query_one(HITLInputBar)
+            hitl_bar.enable(role=self._config.hitl.role)
         # Start the session in a background worker
         self.run_worker(self._run_session_worker(), exclusive=True)
 
@@ -80,7 +84,7 @@ class LiveChatScreen(Screen):
 
         bus.stream() \
             .filter(lambda e: e.type == "MESSAGE") \
-            .subscribe(self._on_message)
+            .subscribe(self._handle_chat_message)
 
         bus.stream() \
             .filter(lambda e: e.type in ("MONOLOGUE", "TURN")) \
@@ -110,7 +114,7 @@ class LiveChatScreen(Screen):
     # EventBus handlers
     # ------------------------------------------------------------------
 
-    def _on_message(self, event: MessageEvent) -> None:
+    def _handle_chat_message(self, event: MessageEvent) -> None:
         self.query_one(ChannelTabs).append_message(event)
 
     def _on_system_event(self, event) -> None:
@@ -128,17 +132,25 @@ class LiveChatScreen(Screen):
             roster.set_status(agent_id, "thinking")
 
     def _on_session_end(self, event: SessionEndEvent) -> None:
-        self.notify(
-            f"Session ended: {event.reason}",
-            title="Session Complete",
-            timeout=5,
-        )
+        if event.reason == "error":
+            self.notify(
+                "Session ended due to an error. Check the logs for details.",
+                title="Session Error",
+                severity="error",
+                timeout=10,
+            )
+        else:
+            self.notify(
+                f"Session ended: {event.reason}",
+                title="Session Complete",
+                timeout=5,
+            )
 
     # ------------------------------------------------------------------
     # HITL
     # ------------------------------------------------------------------
 
-    def on_hitl_input_bar_hitl_message(self, event: HITLInputBar.HITLMessage) -> None:
+    def on_hitlinput_bar_hitlmessage(self, event: HITLInputBar.HITLMessage) -> None:
         if self._engine is not None:
             self._engine.inject_hitl_message(event.text, event.channel_id)
 

@@ -222,6 +222,28 @@ class SessionEngine:
                 )
                 break
 
+            # Handle wait_for_hitl — apply game state, pause, then
+            # re-enter the loop (which blocks at resume_event.wait())
+            if orch_output.wait_for_hitl:
+                if orch_output.game_state_updates:
+                    for k, v in orch_output.game_state_updates.items():
+                        state.game_state.custom[k] = v
+                    gs_event = GameStateEvent(
+                        timestamp=datetime.now(UTC),
+                        turn_number=state.turn_number,
+                        session_id=self._session_id,
+                        updates=orch_output.game_state_updates,
+                        full_state=state.game_state.model_dump(),
+                    )
+                    self._bus.emit(gs_event)
+                    state.events.append(gs_event)
+                log.info(
+                    "session.waiting_for_hitl",
+                    turn=state.turn_number,
+                )
+                self._resume_event.clear()
+                continue
+
             # Handle rule violations from previous turn
             for violation in orch_output.rule_violations:
                 rv_event = RuleViolationEvent(
@@ -438,6 +460,12 @@ class SessionEngine:
             )
             self._bus.emit(mono_event)
             state.events.append(mono_event)
+            log.debug(
+                "agent.monologue",
+                agent=agent_config.name,
+                text=parsed.thinking[:120],
+                turn=state.turn_number,
+            )
 
         # Emit team message
         if parsed.team_message and agent_config.team:
@@ -454,6 +482,13 @@ class SessionEngine:
             )
             self._bus.emit(team_event)
             state.events.append(team_event)
+            log.info(
+                "agent.team_message",
+                agent=agent_config.name,
+                channel=agent_config.team,
+                text=parsed.team_message[:120],
+                turn=state.turn_number,
+            )
 
         # Emit private message
         if parsed.private_to and parsed.private_message:
@@ -489,6 +524,13 @@ class SessionEngine:
             )
             self._bus.emit(priv_event)
             state.events.append(priv_event)
+            log.info(
+                "agent.private_message",
+                agent=agent_config.name,
+                to=parsed.private_to,
+                text=parsed.private_message[:120],
+                turn=state.turn_number,
+            )
 
         # Emit public message (always, even if empty after tag extraction)
         if parsed.public_message:
@@ -505,6 +547,12 @@ class SessionEngine:
             )
             self._bus.emit(pub_event)
             state.events.append(pub_event)
+            log.info(
+                "agent.public_message",
+                agent=agent_config.name,
+                text=parsed.public_message[:120],
+                turn=state.turn_number,
+            )
 
         agent_state.status = "idle"
 
@@ -555,6 +603,10 @@ class SessionEngine:
             channel_id=channel_id,
             length=len(text),
         )
+        # Auto-resume if the engine is paused (e.g. waiting for HITL input)
+        if not self._resume_event.is_set():
+            self._resume_event.set()
+            log.info("session.hitl_auto_resume", session_id=self._session_id)
 
     # ------------------------------------------------------------------
     # Helpers

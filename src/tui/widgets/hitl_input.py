@@ -1,4 +1,4 @@
-"""HITLInputBar — text input for the human participant, hidden until their turn."""
+"""HITLInputBar — text input for the human participant."""
 
 from __future__ import annotations
 
@@ -10,8 +10,9 @@ from textual.widgets import Button, Input, Select
 
 class HITLInputBar(Widget):
     """
-    HITL message input — hidden until the human's turn arrives.
+    HITL message input bar.
 
+    When enabled, stays visible so the human can type at any time.
     Emits HITLInputBar.HITLMessage when the user submits.
     """
 
@@ -23,6 +24,10 @@ class HITLInputBar(Widget):
             self.text = text
             self.channel_id = channel_id
 
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._role: str = "Human"
+
     def compose(self) -> ComposeResult:
         yield Select(
             [("Public", "public"), ("Team", "team")],
@@ -32,6 +37,15 @@ class HITLInputBar(Widget):
         )
         yield Input(placeholder="Your message...", id="hitl-input")
         yield Button("Send", id="hitl-send", variant="primary")
+
+    def enable(self, role: str | None = None, has_team: bool = False) -> None:
+        """Activate the bar for the session. Stays visible until session ends."""
+        self._role = role or "Human"
+        self.display = True
+        self.query_one("#channel-select").display = has_team
+        self.query_one("#hitl-input", Input).placeholder = (
+            f"Type as {self._role}..."
+        )
 
     def show_for_turn(self, has_team: bool = False) -> None:
         """Make the bar visible and focus the input."""
@@ -53,4 +67,3 @@ class HITLInputBar(Widget):
         if text:
             self.post_message(self.HITLMessage(text=text, channel_id=channel))
             self.query_one("#hitl-input", Input).clear()
-            self.display = False

@@ -61,9 +61,17 @@ _PROVIDERS = [
 _ORCHESTRATOR_MODULES = [
     ("Basic", "basic"),
     ("Mafia", "mafia"),
+    ("Telephone", "telephone"),
     ("Turn Based", "turn_based"),
     ("Poker", "poker"),
     ("Market Research", "market_research"),
+]
+
+_HITL_ROLES = [
+    ("The Caller — starts the whisper chain", "The Caller"),
+    ("Moderator — guides discussion", "Moderator"),
+    ("Participant — plays as a regular agent", "Participant"),
+    ("Observer — watches, comments when needed", "Observer"),
 ]
 
 _TRANSCRIPT_FORMATS = [
@@ -170,12 +178,14 @@ class SetupWizardScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
-        with Tabs(id="wizard-tabs"):
-            yield Tab("Topic", id="tab_topic")
-            yield Tab("Setting", id="tab_setting")
-            yield Tab("Agents", id="tab_agents")
-            yield Tab("Orchestrator", id="tab_orchestrator")
-            yield Tab("HITL", id="tab_hitl")
+        yield Tabs(
+            Tab("Topic (Metadata)", id="tab_topic"),
+            Tab("Setting", id="tab_setting"),
+            Tab("Agents", id="tab_agents"),
+            Tab("Orchestrator", id="tab_orchestrator"),
+            Tab("HITL", id="tab_hitl"),
+            id="wizard-tabs",
+        )
 
         yield Static(id="topic-pane")
         yield Static(id="setting-pane")
@@ -227,7 +237,7 @@ class SetupWizardScreen(Screen):
         pane.remove_children()
         pane.mount(Label("Session title:", classes="field-label"))
         pane.mount(Input(placeholder="My Session", id="input-title"))
-        pane.mount(Label("Topic:", classes="field-label"))
+        pane.mount(Label("Topic (Metadata):", classes="field-label"))
         pane.mount(TextArea(id="input-topic"))
 
     def _build_setting_pane(self) -> None:
@@ -296,13 +306,12 @@ class SetupWizardScreen(Screen):
         table = DataTable(id="agents-table")
         table.add_columns("Name", "Provider", "Model", "Role", "Team")
         pane.mount(table)
-        with Horizontal(id="agent-buttons"):
-            pane.mount(Horizontal(
-                Button("Add Agent", variant="primary", id="btn-add-agent"),
-                Button("Edit Agent", id="btn-edit-agent"),
-                Button("Remove Agent", variant="error", id="btn-remove-agent"),
-                id="agent-buttons",
-            ))
+        pane.mount(Horizontal(
+            Button("Add Agent", variant="primary", id="btn-add-agent"),
+            Button("Edit Agent", id="btn-edit-agent"),
+            Button("Remove Agent", variant="error", id="btn-remove-agent"),
+            id="agent-buttons",
+        ))
         self._refresh_agents_table()
 
     def _build_orchestrator_pane(self) -> None:
@@ -342,8 +351,13 @@ class SetupWizardScreen(Screen):
 
         pane.mount(Static(id="hitl-settings-section"))
         settings_sec = self.query_one("#hitl-settings-section")
-        settings_sec.mount(Label("Role Name:", classes="field-label"))
-        settings_sec.mount(Input(placeholder="e.g. moderator", id="input-hitl-role"))
+        settings_sec.mount(Label("Role:", classes="field-label"))
+        settings_sec.mount(Select(
+            _HITL_ROLES,
+            value="The Caller",
+            id="input-hitl-role",
+            allow_blank=False,
+        ))
         settings_sec.display = False
 
     # ------------------------------------------------------------------
@@ -520,7 +534,8 @@ class SetupWizardScreen(Screen):
             self.query_one("#input-hitl-enabled", Switch).value = cfg.hitl.enabled
             if cfg.hitl.enabled:
                 self.query_one("#hitl-settings-section").display = True
-                self.query_one("#input-hitl-role", Input).value = cfg.hitl.role or ""
+                role = cfg.hitl.role or "The Caller"
+                self.query_one("#input-hitl-role", Select).value = role
         except Exception:
             pass
 
@@ -597,7 +612,7 @@ class SetupWizardScreen(Screen):
             hitl_enabled = self.query_one("#input-hitl-enabled", Switch).value
             hitl_role = None
             if hitl_enabled:
-                hitl_role = self.query_one("#input-hitl-role", Input).value.strip() or None
+                hitl_role = self.query_one("#input-hitl-role", Select).value or None
 
             # Agents — use wizard agent list
             agents = self._wizard_agents

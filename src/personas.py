@@ -150,16 +150,15 @@ def assign_random_personalities(config: "SessionConfig", seed: int) -> "SessionC
       - All other agents except those in _ROLES_WITHOUT_PERSONALITY draw from the
         remaining profiles after moderator assignments are made.
 
+    If there are more agents than available profiles, assigns as many as
+    possible and leaves the rest without personalities.
+
     Args:
         config: Session configuration (not mutated).
         seed: Random seed for reproducibility (use seconds since 2000-01-01 UTC).
 
     Returns:
         New SessionConfig with personality_id and personality set on eligible agents.
-
-    Raises:
-        ValueError: If there are more moderators than moderator-tagged profiles,
-                    or more regular agents than remaining profiles.
     """
     roster = load_roster()
     profiles = roster.profiles
@@ -168,12 +167,8 @@ def assign_random_personalities(config: "SessionConfig", seed: int) -> "SessionC
     # --- Moderator pool (tagged) ---
     mod_pool = [p for p in profiles if "moderator" in p.tags]
     mod_agents = [a for a in config.agents if a.role == "moderator"]
-    if len(mod_agents) > len(mod_pool):
-        raise ValueError(
-            f"Not enough moderator personality profiles: need {len(mod_agents)}, "
-            f"have {len(mod_pool)}. Add more 'moderator'-tagged profiles to roster.yaml."
-        )
-    mod_selected = rng.sample(mod_pool, k=len(mod_agents))
+    mod_count = min(len(mod_agents), len(mod_pool))
+    mod_selected = rng.sample(mod_pool, k=mod_count)
     mod_used_ids = {p.id for p in mod_selected}
 
     # --- Regular pool (everything not already used by a moderator) ---
@@ -182,12 +177,8 @@ def assign_random_personalities(config: "SessionConfig", seed: int) -> "SessionC
         if a.role not in _ROLES_WITHOUT_PERSONALITY and a.role != "moderator"
     ]
     remaining = [p for p in profiles if p.id not in mod_used_ids]
-    if len(regular_agents) > len(remaining):
-        raise ValueError(
-            f"Not enough personality profiles in roster: need {len(regular_agents)}, "
-            f"have {len(remaining)}. Add more profiles to personas/roster.yaml."
-        )
-    reg_selected = rng.sample(remaining, k=len(regular_agents))
+    reg_count = min(len(regular_agents), len(remaining))
+    reg_selected = rng.sample(remaining, k=reg_count)
 
     # Build assignment map
     assignment: dict[str, PersonalityProfile] = {}
