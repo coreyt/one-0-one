@@ -1,6 +1,7 @@
 """Tests for the authoritative Connect Four game plugin."""
 
 from src.games import ConnectFourGame, GameAction, load_game, load_game_from_config
+from src.games.connect_four import render_connect_four_board
 from src.session.config import AgentConfig, GameConfig
 
 
@@ -53,6 +54,27 @@ class TestConnectFourInitialState:
     def test_registry_loads_from_game_config_plugin(self):
         game = load_game_from_config(GameConfig(plugin="connect_four", name="Connect Four"))
         assert isinstance(game, ConnectFourGame)
+
+    def test_render_board_without_border_for_reasoning(self):
+        game = ConnectFourGame()
+        state = game.initial_state(_config(), _agents())
+
+        rendered = render_connect_four_board(state.board, bordered=False, empty_cell=".")
+
+        assert "┌" not in rendered
+        assert "└" not in rendered
+        assert "1 2 3 4 5 6 7" in rendered
+        assert ". . . . . . ." in rendered
+
+    def test_render_board_with_border_for_main_display(self):
+        game = ConnectFourGame()
+        state = game.initial_state(_config(), _agents())
+
+        rendered = render_connect_four_board(state.board, bordered=True, empty_cell="·")
+
+        assert "┌" in rendered
+        assert "└" in rendered
+        assert "│ · · · · · · · │" in rendered
 
 
 class TestConnectFourParsingAndValidation:

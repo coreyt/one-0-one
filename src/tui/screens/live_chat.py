@@ -8,6 +8,7 @@ from textual.app import ComposeResult
 from textual.screen import Screen
 from textual.widgets import Footer, Header
 
+from src.games.connect_four import render_connect_four_board
 from src.session.config import SessionConfig
 from src.session.engine import SessionEngine
 from src.session.event_bus import EventBus
@@ -286,11 +287,31 @@ class LiveChatScreen(Screen):
             return None
         if self._engine._game_runtime is None:
             return "Game state updated."
+        game_type = self._engine._state.game_state.custom.get("game_type") if self._engine._state else None
         if self._config.hitl.see_non_public_information:
             payload = self._engine._game_runtime.state.model_dump()
+            if game_type == "connect_four":
+                return self._format_connect_four_summary(payload)
             return f"Game state updated: {json.dumps(payload)}"
         participant_id = self._config.hitl.participant_agent_id
         if participant_id is None:
             return "Game state updated."
         visible_state = self._engine._game_runtime.visible_state(participant_id).model_dump()
+        if game_type == "connect_four":
+            return self._format_connect_four_summary(visible_state.get("payload", {}), prefix="Your game view")
         return f"Your game view: {json.dumps(visible_state)}"
+
+    @staticmethod
+    def _format_connect_four_summary(payload: dict, prefix: str = "Game state updated") -> str:
+        board = payload.get("board")
+        if not isinstance(board, list):
+            return f"{prefix}: {json.dumps(payload)}"
+        rendered_board = render_connect_four_board(board, bordered=True, empty_cell="·")
+        lines = [
+            prefix,
+            f"Active player: {payload.get('active_player')}",
+            f"Winner: {payload.get('winner')}",
+            f"Draw: {payload.get('is_draw')}",
+            rendered_board,
+        ]
+        return "\n".join(lines)

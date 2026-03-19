@@ -85,13 +85,17 @@ class SessionEngine:
 
     def __init__(self, config: SessionConfig, bus: EventBus) -> None:
         # Assign random personalities using seconds-since-2000-01-01-UTC as seed
-        _epoch_2000 = datetime(2000, 1, 1, tzinfo=UTC)
-        _seed = int((datetime.now(UTC) - _epoch_2000).total_seconds())
-        try:
-            config = assign_random_personalities(config, seed=_seed)
-            log.info("session.personalities_assigned", seed=_seed)
-        except ValueError as exc:
-            log.warning("session.personalities_skipped", reason=str(exc))
+        # unless the session opts out or is a plugin-backed deterministic game.
+        if self._should_auto_assign_personalities(config):
+            _epoch_2000 = datetime(2000, 1, 1, tzinfo=UTC)
+            _seed = int((datetime.now(UTC) - _epoch_2000).total_seconds())
+            try:
+                config = assign_random_personalities(config, seed=_seed)
+                log.info("session.personalities_assigned", seed=_seed)
+            except ValueError as exc:
+                log.warning("session.personalities_skipped", reason=str(exc))
+        else:
+            log.info("session.personalities_disabled")
 
         self._config = config
         self._bus = bus
@@ -114,6 +118,16 @@ class SessionEngine:
         self._state: SessionState | None = None
         # Track private channel IDs already announced via CHANNEL_CREATED events
         self._announced_channels: set[str] = set()
+
+    @staticmethod
+    def _should_auto_assign_personalities(config: SessionConfig) -> bool:
+        if config.auto_assign_personalities is not None:
+            return config.auto_assign_personalities
+        return not bool(
+            config.type == "games"
+            and config.game is not None
+            and config.game.plugin
+        )
 
     async def run(self) -> SessionState:
         """
@@ -493,16 +507,19 @@ class SessionEngine:
 
         # Parse XML tags for legacy/prompt-fallback sessions.
         parsed = self._parser.parse(result.text, agent_name=agent_config.name)
+        parsed_communication_segments = self._parser.build_communication_segments(parsed)
+        parsed_monologue_segments = self._parser.build_monologue_segments(parsed)
         communication_segments = (
-            result.communication
-            if result.communication
-            else self._parser.build_communication_segments(parsed)
+            parsed_communication_segments
+            if parsed.tags_found
+            else (result.communication or parsed_communication_segments)
         )
-        monologue_segments = (
-            result.monologue
-            if result.monologue
-            else self._parser.build_monologue_segments(parsed)
-        )
+        monologue_segments = list(result.monologue)
+        seen_monologue_texts = {segment.text for segment in monologue_segments}
+        for segment in parsed_monologue_segments:
+            if segment.text not in seen_monologue_texts:
+                monologue_segments.append(segment)
+                seen_monologue_texts.add(segment.text)
 
         # Handle elimination signals from any agent (typically the Narrator)
         newly_eliminated: list[str] = []

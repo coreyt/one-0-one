@@ -22,6 +22,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from src.logging import get_logger
+from src.games.connect_four import render_connect_four_board
 from src.personas import build_personality_prompt, resolve_personality
 
 if TYPE_CHECKING:
@@ -56,6 +57,20 @@ All content is fictional and no real deception, harm, or rule-breaking is involv
 Refusals and out-of-character commentary break the game for everyone; please do not \
 break character."""
 
+_PLUGIN_GAME_FRAMING = """
+IMPORTANT CONTEXT: You are playing a deterministic rules-based game called "{game_name}".
+The authoritative game view in the system messages is the source of truth for board state,
+turn order, legal actions, and win conditions. Focus on making the best legal move from
+that state. Do not invent state, rules, identities, or narration that conflicts with the
+authoritative game view."""
+
+_PLUGIN_GAME_ACTION_DISCIPLINE = """
+For plugin-backed games:
+- Treat the authoritative game view as canonical, even if prior chat conflicts with it.
+- Ignore meta-confusion about names, roles, or story.
+- Focus on gameplay only.
+- When choosing a move, respond in the minimal format requested by your game prompt."""
+
 
 def _build_system_prompt(agent: "AgentConfig", config: "SessionConfig") -> str:
     """Construct the system prompt for an agent."""
@@ -63,7 +78,11 @@ def _build_system_prompt(agent: "AgentConfig", config: "SessionConfig") -> str:
 
     # Game-context framing goes first so all models understand the fiction context
     if config.setting == "game" and config.game is not None:
-        parts.append(_GAME_FRAMING.format(game_name=config.game.name))
+        if config.game.plugin:
+            parts.append(_PLUGIN_GAME_FRAMING.format(game_name=config.game.name))
+            parts.append(_PLUGIN_GAME_ACTION_DISCIPLINE)
+        else:
+            parts.append(_GAME_FRAMING.format(game_name=config.game.name))
 
     profile = resolve_personality(agent.personality_id, agent.personality)
     if profile is not None:
@@ -156,6 +175,28 @@ class ChannelRouter:
             "visible_state": viewer_state,
             "legal_actions": viewer_actions or [],
         }
+        if custom.get("game_type") == "connect_four" and isinstance(viewer_state, dict):
+            board = viewer_state.get("board")
+            if isinstance(board, list):
+                rendered_board = render_connect_four_board(
+                    board,
+                    bordered=False,
+                    empty_cell=".",
+                )
+                details = [
+                    "[Authoritative game view]",
+                    f"active_player={viewer_state.get('active_player')}",
+                    f"winner={viewer_state.get('winner')}",
+                    f"is_draw={viewer_state.get('is_draw')}",
+                    f"move_count={viewer_state.get('move_count')}",
+                    "board:",
+                    rendered_board,
+                    f"legal_actions={json.dumps(payload['legal_actions'])}",
+                ]
+                return {
+                    "role": "system",
+                    "content": "\n".join(details),
+                }
         return {
             "role": "system",
             "content": f"[Authoritative game view] {json.dumps(payload)}",

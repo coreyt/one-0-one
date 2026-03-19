@@ -23,7 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.games import GameAction, HybridAuditRecord, ModerationDecision
-from src.providers import CompletionResult, MonologueSegment, TokenUsage
+from src.providers import CommunicationSegment, CompletionResult, MonologueSegment, TokenUsage
 from src.session.config import (
     AgentConfig,
     ChannelConfig,
@@ -328,6 +328,21 @@ class TestSessionLifecycle:
         turn_numbers = [e.turn_number for e in turn_events]
         assert turn_numbers == sorted(turn_numbers)
 
+    async def test_plugin_games_skip_random_personality_assignment_by_default(self):
+        config = _make_connect_four_player_only_config(max_turns=1)
+        bus = EventBus()
+
+        with patch("src.session.engine.assign_random_personalities") as assign_mock:
+            with patch("src.session.engine.LiteLLMClient") as MockClient:
+                MockClient.return_value.complete = AsyncMock(return_value=_make_result("Column 4."))
+                with patch("src.session.engine.TranscriptWriter") as MockWriter:
+                    MockWriter.return_value.record = MagicMock()
+                    MockWriter.return_value.flush = AsyncMock()
+                    engine = SessionEngine(config, bus)
+                    await engine.run()
+
+        assign_mock.assert_not_called()
+
     async def test_plugin_game_emits_initial_authoritative_state(self):
         config = _make_connect_four_config(max_turns=1)
         events = await _run_and_collect(config, mock_response="Opening narration.")
@@ -454,6 +469,39 @@ class TestMessageRouting:
         assert len(mono_events) >= 1
         assert mono_events[0].text == "Provider-native reasoning."
         assert any(e.text == "Visible reply." for e in public_msgs)
+
+    async def test_provider_raw_communication_with_thinking_is_reparsed_before_emit(self):
+        config = _make_config(max_turns=1)
+        bus = EventBus()
+        events = _setup_event_capture(bus)
+
+        provider_result = CompletionResult(
+            text="<thinking>Hidden thoughts.</thinking>Visible reply.",
+            usage=TokenUsage(prompt_tokens=10, completion_tokens=5),
+            model="test-model",
+            communication=[
+                CommunicationSegment(
+                    visibility="public",
+                    text="<thinking>Hidden thoughts.</thinking>Visible reply.",
+                )
+            ],
+        )
+
+        with patch("src.session.engine.LiteLLMClient") as MockClient:
+            mi = MockClient.return_value
+            mi.complete = AsyncMock(return_value=provider_result)
+
+            with patch("src.session.engine.TranscriptWriter") as MockWriter:
+                MockWriter.return_value.record = MagicMock()
+                MockWriter.return_value.flush = AsyncMock()
+                engine = SessionEngine(config, bus)
+                await engine.run()
+
+        mono_events = [e for e in events if e.type == "MONOLOGUE"]
+        public_msgs = [e for e in events if e.type == "MESSAGE" and e.channel_id == "public"]
+        assert any(e.text == "Hidden thoughts." for e in mono_events)
+        assert any(e.text == "Visible reply." for e in public_msgs)
+        assert all("Hidden thoughts." not in e.text for e in public_msgs)
 
     async def test_private_tag_sets_recipient(self):
         config = _make_config(max_turns=1)

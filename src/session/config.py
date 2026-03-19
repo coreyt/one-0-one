@@ -173,6 +173,7 @@ class SessionConfig(BaseModel):
     max_turns: int | None = None
     completion_signal: str | None = None
     game: GameConfig | None = None
+    auto_assign_personalities: bool | None = None
 
     @model_validator(mode="after")
     def validate_cross_fields(self) -> "SessionConfig":

@@ -8,6 +8,7 @@ from src.channels.router import ChannelRouter
 from src.session.config import (
     AgentConfig,
     ChannelConfig,
+    GameConfig,
     HITLConfig,
     OrchestratorConfig,
     SessionConfig,
@@ -221,3 +222,59 @@ class TestSystemPrompt:
         assert "<thinking>" in system
         assert "<private" in system
         assert "<team>" in system
+
+    def test_plugin_game_system_prompt_prioritizes_authoritative_state(self):
+        config = SessionConfig.model_validate({
+            "title": "Connect Four",
+            "description": "Test",
+            "type": "games",
+            "setting": "game",
+            "topic": "Play Connect Four.",
+            "agents": [
+                {"id": "player_red", "name": "Red", "provider": "p", "model": "m", "role": "player"},
+            ],
+            "game": GameConfig(plugin="connect_four", name="Connect Four").model_dump(),
+        })
+        router = ChannelRouter(config)
+        state = _make_state(config)
+
+        system = router.build_context("player_red", state)[0]["content"]
+        assert "authoritative game view" in system.lower()
+        assert "focus on gameplay" in system.lower()
+        assert "cooperative, fictional storytelling game" not in system.lower()
+
+    def test_connect_four_authoritative_view_uses_plain_board_without_border(self):
+        config = SessionConfig.model_validate({
+            "title": "Connect Four",
+            "description": "Test",
+            "type": "games",
+            "setting": "game",
+            "topic": "Play Connect Four.",
+            "agents": [
+                {"id": "player_red", "name": "Red", "provider": "p", "model": "m", "role": "player"},
+                {"id": "player_black", "name": "Black", "provider": "p", "model": "m", "role": "player"},
+            ],
+            "game": GameConfig(plugin="connect_four", name="Connect Four").model_dump(),
+        })
+        router = ChannelRouter(config)
+        state = _make_state(config)
+        state.game_state.custom["game_type"] = "connect_four"
+        state.game_state.custom["authoritative_state"] = {"active_player": "player_red"}
+        state.game_state.custom["visible_states"] = {
+            "player_red": {
+                "board": [["." for _ in range(7)] for _ in range(6)],
+                "active_player": "player_red",
+                "winner": None,
+                "is_draw": False,
+                "move_count": 0,
+            }
+        }
+        state.game_state.custom["legal_actions"] = {
+            "player_red": [{"action_type": "drop_disc", "input_schema": {"column": [1, 2, 3, 4, 5, 6, 7]}}],
+        }
+
+        system = router.build_context("player_red", state)[1]["content"]
+        assert "board:" in system
+        assert ". . . . . . ." in system
+        assert "┌" not in system
+        assert "└" not in system

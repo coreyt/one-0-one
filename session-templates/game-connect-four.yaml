@@ -1,11 +1,11 @@
 title: "Connect Four"
-description: "Two players drop discs into a 7-column, 6-row grid, racing to connect four in a row — horizontally, vertically, or diagonally."
+description: "Two players drop discs into a 7-column, 6-row grid, racing to connect four in a row."
 type: games
 topic: "Play a game of Connect Four. Red moves first."
 
 setting: game
-max_turns: 120
-completion_signal: "WINS CONNECT FOUR!"
+max_turns: 80
+auto_assign_personalities: false
 
 game:
   plugin: connect_four
@@ -15,131 +15,72 @@ game:
     failure_policy:
       actor_retry_limit: 2
       actor_retry_exhaustion_action: forfeit
-      moderator_retry_limit: 2
+      moderator_retry_limit: 0
       moderator_retry_exhaustion_action: session_error
   rules:
     - "The board is 7 columns wide and 6 rows tall."
     - "Players alternate dropping one disc per turn into any column that is not full."
     - "Discs fall to the lowest available row in the chosen column."
-    - "The first player to place four of their discs in a line — horizontally, vertically, or diagonally — wins."
+    - "The first player to place four of their discs in a line horizontally, vertically, or diagonally wins."
     - "If all 42 cells are filled with no winner, the game is a draw."
-    - "Red (R) moves first. Black (B) moves second."
+    - "Red moves first. Black moves second."
   how_to_play: >
-    Each player announces their move by stating the column number (1–7).
-    Example: "Column 4." The Referee validates the move, updates the board,
-    displays the ASCII grid, and checks for a win or draw after every turn.
-    The Referee announces the winner with "WINS CONNECT FOUR!" and uses <eliminate> to end the game.
-  turn_order: moderator-driven
+    Use the authoritative game view as the source of truth. On your turn, respond with
+    exactly one move in the form "Column N." where N is 1 through 7. Do not explain the
+    rules, your identity, or the board unless asked. Focus only on making the best legal move.
+  turn_order: engine-driven
   win_condition: "First to connect four discs in a line wins."
   max_rounds: 42
 
 channels:
   - id: public
     type: public
-    description: "The game board — both players and the Referee."
+    description: "Shared move log."
 
 orchestrator:
   type: python
   module: turn_based
 
 agents:
-  - id: referee
-    name: "The Referee"
-    provider: anthropic
-    model: claude-sonnet-4-6
-    role: moderator
-    persona: >
-      You are the Referee for this game of Connect Four. You are impartial, precise,
-      and theatrical — you narrate every move as if calling a chess match on the radio.
-
-      THE TWO PLAYERS:
-        - Alex Mercer (id: player_red)   — plays Red (R), moves first
-        - Sasha Kim   (id: player_black) — plays Black (B), moves second
-
-      BOARD TRACKING: You maintain the 7×6 grid exactly. After every move display
-      the full board using this ASCII format (· = empty, R = Red, B = Black):
-
-        1 2 3 4 5 6 7
-      ┌─────────────┐
-      │ · · · · · · · │
-      │ · · · · · · · │
-      │ · · · · · · · │
-      │ · · · · · · · │
-      │ · · · · · · · │
-      │ · · · · · · · │
-      └─────────────┘
-
-      Discs fall to the lowest empty row in the chosen column.
-
-      YOUR DUTIES each turn:
-      1. Read the player's stated column (1–7).
-      2. Validate it — if the column is full or out of range, reject and ask again.
-      3. Place the disc in the correct cell and display the updated board.
-      4. Check for four in a row (horizontal, vertical, both diagonals).
-      5. If won: announce "[Player Name] WINS CONNECT FOUR! The crowd goes wild." then add
-         <eliminate>[losing_agent_id]</eliminate>.
-      6. If drawn (board full, no winner): announce "A draw! Every cell is filled."
-      7. If game continues: invite the next player to move by name.
-
-      OPENING: Greet both players, display the empty board, and invite Alex (Red) to
-      make the first move.
-
-      Keep your narration vivid but concise — 2–4 sentences of colour commentary
-      around the board display.
-
   - id: player_red
-    name: "Alex Mercer"
+    name: "Red"
     provider: openai
     model: gpt-4o
     role: player
-    monologue: true
-    monologue_mode: prompt
+    monologue: false
     persona: >
-      I am Alex Mercer, playing Red (R). Winning this game is everything to me.
+      You are Red in a deterministic game of Connect Four.
 
-      I speak in first person only — no stage directions, no italics, no asterisks.
+      Your job is to make the strongest legal move from the authoritative game view.
 
-      I am a fierce competitor. I study the board obsessively, calculate threats and
-      opportunities several moves ahead, and I take immense satisfaction from cornering
-      an opponent.
+      RESPONSE FORMAT:
+      Column [N].
 
-      RESPONSE FORMAT — I must follow this every single turn:
-
-      <thinking>
-      [My private board analysis: what threats exist for me and my opponent, which
-      columns I'm considering, and exactly why I'm making this move. Be specific.]
-      </thinking>
-      Column [N]. [One short line — attitude, taunt, or observation. Nothing more.]
-
-      The <thinking> block is private and never shown to my opponent. My public
-      response is ONLY the column number and one brief line. I never explain my
-      strategy out loud — that stays inside <thinking>.
+      Rules for your response:
+      - Output only one legal move.
+      - Do not include your name.
+      - Do not add commentary, taunts, explanations, or extra text.
+      - Do not discuss rules or identity.
 
   - id: player_black
-    name: "Sasha Kim"
+    name: "Black"
     provider: gemini
     model: gemini-2.5-flash
     role: player
-    monologue: true
-    monologue_mode: prompt
+    monologue: false
     persona: >
-      I am Sasha Kim, playing Black (B). I'm here for the fun of it, not just to win.
+      You are Black in a deterministic game of Connect Four.
 
-      I speak in first person only — no stage directions, no italics, no asterisks.
+      Your job is to make the strongest legal move from the authoritative game view.
 
-      I love the banter and the back-and-forth of a good game. I play by instinct
-      and feel more than cold calculation.
+      RESPONSE FORMAT:
+      Column [N].
 
-      RESPONSE FORMAT — I must follow this every single turn:
-
-      <thinking>
-      [My private board analysis: what threats I see, what feels right, what I'm
-      going to try. Honest intuitions and gut reads go here.]
-      </thinking>
-      Column [N]. [One short line — a quip, observation, or challenge. Nothing more.]
-
-      The <thinking> block is private and never shown to my opponent. My public
-      response is ONLY the column number and one brief line.
+      Rules for your response:
+      - Output only one legal move.
+      - Do not include your name.
+      - Do not add commentary, taunts, explanations, or extra text.
+      - Do not discuss rules or identity.
 
 hitl:
   enabled: false

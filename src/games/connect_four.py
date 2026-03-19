@@ -26,6 +26,34 @@ if TYPE_CHECKING:
 _COLUMN_RE = re.compile(r"\b(?:column\s*)?([1-7])\b", re.IGNORECASE)
 
 
+def render_connect_four_board(
+    board: list[list[str]],
+    *,
+    bordered: bool,
+    empty_cell: str = "·",
+) -> str:
+    """Render a Connect Four board for either player-facing or reasoning use."""
+    if not board:
+        return ""
+
+    column_count = len(board[0])
+    header = "  " + " ".join(str(index) for index in range(1, column_count + 1))
+    rows = [" ".join(empty_cell if cell == "." else cell for cell in row) for row in board]
+    if not bordered:
+        return "\n".join([header, *rows])
+
+    width = column_count * 2 - 1
+    framed_rows = [f"│ {row} │" for row in rows]
+    return "\n".join(
+        [
+            header,
+            f"┌{'─' * (width + 2)}┐",
+            *framed_rows,
+            f"└{'─' * (width + 2)}┘",
+        ]
+    )
+
+
 class ConnectFourState(GameStateBase):
     """Authoritative runtime state for Connect Four."""
 
@@ -47,6 +75,19 @@ class ConnectFourGame:
     """Deterministic Connect Four plugin with authoritative board state."""
 
     game_type = "connect_four"
+
+    @staticmethod
+    def render_board(
+        board: list[list[str]],
+        *,
+        bordered: bool,
+        empty_cell: str = "·",
+    ) -> str:
+        return render_connect_four_board(
+            board,
+            bordered=bordered,
+            empty_cell=empty_cell,
+        )
 
     def initial_state(
         self,
