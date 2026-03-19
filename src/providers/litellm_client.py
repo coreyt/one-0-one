@@ -73,6 +73,23 @@ _REASONING_EFFORT_PROVIDERS = frozenset(["openai"])  # o-series models
 _CLAUDE_THINKING_MODELS = ("claude-3-7", "claude-3-5", "claude-opus-4", "claude-sonnet-4")
 
 
+def _resolve_router_url(explicit_url: str | None) -> str:
+    """Resolve router URL from explicit settings or AIRLOCK_HOST/AIRLOCK_PORT."""
+    if explicit_url:
+        return explicit_url
+    host = os.environ.get("AIRLOCK_HOST", "").strip()
+    port = os.environ.get("AIRLOCK_PORT", "").strip()
+    if not host and not port:
+        return ""
+    if not host:
+        host = "localhost"
+    if not port:
+        port = "4000"
+    if host == "0.0.0.0":
+        host = "127.0.0.1"
+    return f"http://{host}:{port}/v1"
+
+
 def _supports_native_thinking(model: str) -> tuple[bool, str]:
     """
     Return (supports_thinking, provider) for a model string.
@@ -159,8 +176,13 @@ class LiteLLMClient:
 
     def __init__(self, router_url: str | None = None) -> None:
         # Empty string = direct mode (call providers without a proxy)
-        self._router_url = router_url if router_url is not None else settings.litellm_router_url
+        configured_url = router_url if router_url is not None else settings.litellm_router_url
+        self._router_url = _resolve_router_url(configured_url)
+        self._airlock_api_key = os.environ.get("AIRLOCK_MASTER_KEY", "").strip()
+        self._airlock_client = os.environ.get("AIRLOCK_CLIENT") or settings.airlock_client
         if self._router_url:
+            if self._airlock_client and not os.environ.get("AIRLOCK_CLIENT"):
+                os.environ["AIRLOCK_CLIENT"] = self._airlock_client
             litellm.api_base = self._router_url
 
     async def complete(
@@ -225,6 +247,13 @@ class LiteLLMClient:
                 call_kwargs["extra_body"] = extra_body
             if self._router_url:
                 call_kwargs["api_base"] = self._router_url
+                if self._airlock_api_key:
+                    call_kwargs["api_key"] = self._airlock_api_key
+                if self._airlock_client:
+                    call_kwargs["extra_headers"] = {
+                        **call_kwargs.get("extra_headers", {}),
+                        "X-Airlock-Client": self._airlock_client,
+                    }
             response = await litellm.acompletion(**call_kwargs, timeout=timeout)
         except litellm.exceptions.AuthenticationError as exc:
             raise ProviderError(
