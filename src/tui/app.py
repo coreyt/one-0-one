@@ -14,6 +14,7 @@ from textual.binding import Binding
 from textual.widgets import Footer, Header
 
 from src.logging import configure_logging
+from src.settings import settings
 from src.tui.screens.browser import SessionBrowserScreen
 
 
@@ -35,7 +36,7 @@ class OneOhOneApp(App):
 
 
 def main() -> None:
-    configure_logging()
+    configure_logging(settings.log_level, mode="tui")
     app = OneOhOneApp()
     app.run()
 

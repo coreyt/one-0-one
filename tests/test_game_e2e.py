@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from src.games import GameAction, GameRuntime, ModerationDecision, ScriptedModerationBackend
-from src.providers import CompletionResult, TokenUsage
+from src.providers import CompletionResult, MonologueSegment, TokenUsage
 from src.session.config import AgentConfig, GameConfig, HITLConfig, OrchestratorConfig, SessionConfig, TranscriptConfig
 from src.session.engine import SessionEngine
 from src.session.event_bus import EventBus
@@ -235,6 +235,59 @@ async def test_session_runner_e2e_live_llm_moderated_connect_four_uses_provider_
         event["type"] == "GAME_STATE" and "authoritative_delta" in event["updates"]
         for event in payload["events"]
     )
+
+
+async def test_session_runner_e2e_provider_native_monologue_in_real_game_session(tmp_path):
+    config = _connect_four_llm_config(tmp_path, max_turns=1, monologue=False)
+    config.agents[1].monologue = True
+    config.agents[1].monologue_mode = "native"
+    bus = EventBus()
+
+    async def complete_side_effect(**kwargs):
+        messages = kwargs["messages"]
+        if messages and messages[0]["role"] == "system":
+            if "authoritative game moderator" in messages[0]["content"]:
+                return CompletionResult(
+                    text='{"accepted": true, "reason": "Accepted."}',
+                    usage=TokenUsage(prompt_tokens=7, completion_tokens=3),
+                    model="moderator-model",
+                    metadata={
+                        "moderation_decision": {
+                            "accepted": True,
+                            "reason": "Accepted.",
+                        }
+                    },
+                )
+        return CompletionResult(
+            text="Column 4.",
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+            model="player-model",
+            monologue=[
+                MonologueSegment(
+                    text="Center control is strongest here.",
+                    source="provider_native",
+                )
+            ],
+        )
+
+    with patch("src.session.engine.LiteLLMClient") as MockClient:
+        MockClient.return_value.complete = AsyncMock(side_effect=complete_side_effect)
+        engine = SessionEngine(config, bus)
+        state = await engine.run()
+
+    assert any(
+        event.type == "MONOLOGUE" and event.text == "Center control is strongest here."
+        for event in state.events
+    )
+    transcripts = sorted(tmp_path.glob("*.json"))
+    payload = json.loads(transcripts[0].read_text(encoding="utf-8"))
+    assert any(
+        event["type"] == "MONOLOGUE"
+        and event["text"] == "Center control is strongest here."
+        for event in payload["events"]
+    )
+    markdown = sorted(tmp_path.glob("*.md"))[0].read_text(encoding="utf-8")
+    assert "Center control is strongest here." in markdown
 
 
 async def test_session_runner_e2e_battleship_reaches_terminal_state_without_hidden_state_leak(tmp_path):

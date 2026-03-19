@@ -25,6 +25,11 @@ SetupWizardScreen {
     text-style: bold;
 }
 
+.field-help {
+    color: $text-muted;
+    margin-bottom: 1;
+}
+
 .field-error {
     color: $error;
     text-style: italic;

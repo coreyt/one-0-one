@@ -17,9 +17,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from src.logging import configure_logging
+from src.settings import settings
 from src.web.api import router as api_router
 
-configure_logging()
+configure_logging(settings.log_level)
 
 
 def serve() -> None:

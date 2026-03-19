@@ -152,6 +152,43 @@ def _make_live_chat_config(*, monologue: bool = True, max_turns: int = 3):
     )
 
 
+def _make_live_chat_battleship_config(*, monologue: bool = False, max_turns: int = 33):
+    from src.session.config import GameConfig, HITLConfig, OrchestratorConfig, SessionConfig, TranscriptConfig
+
+    return SessionConfig(
+        title="Live Chat Battleship",
+        description="TUI battleship test",
+        type="games",
+        setting="game",
+        topic="Play Battleship.",
+        agents=[
+            AgentConfig(
+                id="captain_alpha",
+                name="Commander Hayes",
+                provider="openai",
+                model="gpt-4o",
+                role="player",
+                monologue=monologue,
+                monologue_mode="prompt",
+            ),
+            AgentConfig(
+                id="captain_beta",
+                name="Captain Voss",
+                provider="google",
+                model="gemini-2.5-flash",
+                role="player",
+                monologue=monologue,
+                monologue_mode="prompt",
+            ),
+        ],
+        game=GameConfig(plugin="battleship", name="Battleship"),
+        orchestrator=OrchestratorConfig(type="python", module="turn_based"),
+        hitl=HITLConfig(enabled=False),
+        transcript=TranscriptConfig(auto_save=False, format="markdown", path="/tmp/"),
+        max_turns=max_turns,
+    )
+
+
 def _build_live_chat_runtime():
     from src.session.config import GameConfig, SessionConfig
 
@@ -752,6 +789,57 @@ transcript:
                 lv = app.screen.query_one(ListView)
                 assert len(list(lv.query("ListItem"))) == 1
 
+    async def test_browser_new_session_seeds_wizard_from_highlighted_template(self, tmp_path):
+        from src.tui.app import OneOhOneApp
+        from src.tui.screens.wizard import SetupWizardScreen
+        from textual.widgets import Input, ListView
+
+        template_yaml = """\
+title: "Connect Four"
+description: "A seeded template"
+type: games
+setting: game
+topic: "Play Connect Four."
+agents:
+  - id: referee
+    name: The Referee
+    provider: anthropic
+    model: claude-sonnet-4-6
+    role: moderator
+  - id: player_red
+    name: Alex
+    provider: openai
+    model: gpt-4o
+    role: player
+game:
+  plugin: connect_four
+  name: "Connect Four"
+orchestrator:
+  type: python
+  module: turn_based
+hitl:
+  enabled: false
+transcript:
+  auto_save: false
+  format: markdown
+  path: /tmp/
+"""
+        (tmp_path / "connect-four.yaml").write_text(template_yaml)
+
+        with patch("src.tui.screens.browser.settings") as mock_settings:
+            mock_settings.session_templates_path = str(tmp_path)
+            app = OneOhOneApp()
+            async with app.run_test(headless=True, size=(100, 30)) as pilot:
+                await pilot.pause()
+                await pilot.pause()
+                await pilot.pause()
+                lv = app.screen.query_one(ListView)
+                assert len(list(lv.query("ListItem"))) == 1
+                app.screen.action_new_session()
+                await pilot.pause()
+                assert isinstance(app.screen, SetupWizardScreen)
+                assert app.screen.query_one("#input-title", Input).value == "Connect Four"
+
 
 class TestLiveChatScreen:
     async def test_live_chat_runs_moderated_game_and_renders_chat_system_and_monologue(self):
@@ -797,3 +885,50 @@ class TestLiveChatScreen:
                     assert len(mono_log.lines) > 0
                     assert "ended" in str(turn_label.render()).lower()
                     assert any("Session ended" in message for message, _ in app.notifications)
+
+    async def test_live_chat_runs_battleship_and_renders_terminal_state(self):
+        from src.tui.screens.live_chat import LiveChatScreen
+
+        responses = [
+            "B1", "A10",
+            "B2", "A9",
+            "B3", "A8",
+            "B4", "A7",
+            "B5", "A6",
+            "D1", "J10",
+            "D2", "J9",
+            "D3", "J8",
+            "D4", "J7",
+            "F1", "J6",
+            "F2", "I10",
+            "F3", "I9",
+            "H1", "I8",
+            "H2", "I7",
+            "H3", "I6",
+            "J1", "H10",
+            "J2",
+        ]
+        completions = [
+            CompletionResult(
+                text=text,
+                usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+                model="test-model",
+            )
+            for text in responses
+        ]
+
+        with patch("src.session.engine.LiteLLMClient") as MockClient:
+            MockClient.return_value.complete = AsyncMock(side_effect=completions)
+            app = LiveChatTestApp(LiveChatScreen(_make_live_chat_battleship_config()))
+            async with app.run_test(headless=True, size=(120, 40)) as pilot:
+                for _ in range(24):
+                    await pilot.pause()
+
+                screen = app.screen
+                logs = screen.query("RichLog")
+                line_count = sum(len(log.lines) for log in logs)
+                turn_label = screen.query_one("#turn-label", Label)
+
+                assert line_count > 0
+                assert "ended" in str(turn_label.render()).lower()
+                assert any("Session ended" in message for message, _ in app.notifications)

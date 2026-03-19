@@ -235,6 +235,13 @@ class SetupWizardScreen(Screen):
     def _build_topic_pane(self) -> None:
         pane = self.query_one("#topic-pane")
         pane.remove_children()
+        pane.mount(
+            Label(
+                "What this tab is for: name the session and optionally tweak the prompt topic shown to participants. "
+                "If you opened the wizard from a template, these fields are already seeded and you usually only change them if you want a variant run.",
+                classes="field-help",
+            )
+        )
         pane.mount(Label("Session title:", classes="field-label"))
         pane.mount(Input(placeholder="My Session", id="input-title"))
         pane.mount(Label("Topic (Metadata):", classes="field-label"))
@@ -243,6 +250,13 @@ class SetupWizardScreen(Screen):
     def _build_setting_pane(self) -> None:
         pane = self.query_one("#setting-pane")
         pane.remove_children()
+        pane.mount(
+            Label(
+                "What this tab is for: session-level runtime settings. For a game template, most users only review this tab. "
+                "Use Session Type/Setting for classification, Max Turns to cap the run, and the Game Configuration section only if you are intentionally changing the rules copy or metadata.",
+                classes="field-help",
+            )
+        )
 
         pane.mount(Label("Session Type:", classes="field-label"))
         pane.mount(Select(_SESSION_TYPES, value="social", id="input-type"))
@@ -302,6 +316,13 @@ class SetupWizardScreen(Screen):
     def _build_agents_pane(self) -> None:
         pane = self.query_one("#agents-pane")
         pane.remove_children()
+        pane.mount(
+            Label(
+                "What this tab is for: choose who is playing. Add/edit/remove agents only when you want a different roster, model, persona, or team layout. "
+                "If you started from a template, leaving the roster alone is valid.",
+                classes="field-help",
+            )
+        )
         pane.mount(Label("Agent Roster:", classes="field-label"))
         table = DataTable(id="agents-table")
         table.add_columns("Name", "Provider", "Model", "Role", "Team")
@@ -317,6 +338,13 @@ class SetupWizardScreen(Screen):
     def _build_orchestrator_pane(self) -> None:
         pane = self.query_one("#orchestrator-pane")
         pane.remove_children()
+        pane.mount(
+            Label(
+                "What this tab is for: select how turns are scheduled. For most built-in game templates, keep the existing Python orchestrator. "
+                "Only switch to an LLM orchestrator if you are explicitly experimenting with LLM-based turn control.",
+                classes="field-help",
+            )
+        )
 
         pane.mount(Label("Orchestrator Type:", classes="field-label"))
         pane.mount(Select(
@@ -345,6 +373,12 @@ class SetupWizardScreen(Screen):
     def _build_hitl_pane(self) -> None:
         pane = self.query_one("#hitl-pane")
         pane.remove_children()
+        pane.mount(
+            Label(
+                "What this tab is for: optional human-in-the-loop participation. Leave HITL disabled unless you want a human to inject messages during the live session.",
+                classes="field-help",
+            )
+        )
 
         pane.mount(Label("Enable HITL:", classes="field-label"))
         pane.mount(Switch(value=False, id="input-hitl-enabled"))

@@ -107,7 +107,15 @@ class SessionBrowserScreen(Screen):
 
     def action_new_session(self) -> None:
         from src.tui.screens.wizard import SetupWizardScreen
-        self.app.push_screen(SetupWizardScreen())
+        lv = self.query_one(ListView)
+        highlighted = lv.highlighted_child
+        if highlighted is None:
+            try:
+                highlighted = next(iter(lv.query(TemplateItem)))
+            except StopIteration:
+                highlighted = None
+        config = highlighted.config if isinstance(highlighted, TemplateItem) else None
+        self.app.push_screen(SetupWizardScreen(config))
 
     def action_open_history(self) -> None:
         from src.tui.screens.history import SessionHistoryScreen

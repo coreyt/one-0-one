@@ -25,6 +25,7 @@ class Settings(BaseSettings):
 
     # Filesystem paths
     sessions_path: Path = Path("./sessions")
+    logs_path: Path = Path("./logs")
     session_templates_path: Path = Path("./session-templates")
 
     # Transcript checkpoint frequency (events between flushes)

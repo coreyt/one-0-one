@@ -35,7 +35,7 @@ Last updated: 2026-03-18
 
 - [x] Verify monologue capture in actual game sessions end to end
   - [x] Cover prompt-fallback monologue in a real moderated game session and transcript output.
-  - [ ] Cover provider-native monologue in a real game session when a live/native-capable test seam is in place.
+  - [x] Cover provider-native monologue in a real game session.
 
 ## In Progress Foundation
 
@@ -64,6 +64,7 @@ Last updated: 2026-03-18
 - The application can play a deterministic game in the engine path today: Connect Four is covered by engine integration tests and reaches win/draw outcomes.
 - The application can now also play a deterministic hidden-information game in the engine path today: Battleship is covered through unit/runtime/session-runner tests and reaches terminal outcome.
 - The supported runtime surface now has real game-play E2E coverage through the session runner and TUI for moderated Connect Four.
+- The supported runtime surface now has real game-play E2E coverage through the session runner for Battleship and through the TUI for both Connect Four and Battleship.
 - The current `tests/test_web_api_e2e.py` file still only exercises the optional web/API plumbing that exists in the repo, and is not the primary proof of product-critical game play.
 - The LLM-moderated path is now wired to a real provider-backed moderator in the live session path and is covered by engine integration and session-runner E2E tests.
-- Provider-native monologue is still not proven in a real game session.
+- Provider-native monologue is now proven in a real game session.
