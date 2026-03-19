@@ -888,6 +888,34 @@ transcript:
                 assert isinstance(app.screen, SetupWizardScreen)
                 assert app.screen.query_one("#input-title", Input).value == "Battleship"
 
+    async def test_seeded_game_wizard_preserves_plugin_and_moderation_runtime_fields(self):
+        from src.tui.screens.wizard import SetupWizardScreen
+
+        class TestApp(App):
+            def __init__(self, screen):
+                super().__init__()
+                self._screen = screen
+
+            def on_mount(self) -> None:
+                self.push_screen(self._screen)
+
+        config = _make_live_chat_config(max_turns=4)
+        config.game.plugin = "connect_four"  # type: ignore[union-attr]
+        config.game.description = "Structured Connect Four."  # type: ignore[union-attr]
+
+        app = TestApp(SetupWizardScreen(config))
+        async with app.run_test(headless=True, size=(100, 30)) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            built = app.screen._build_config()
+
+        assert built is not None
+        assert built.game is not None
+        assert built.game.plugin == "connect_four"
+        assert built.game.moderation.mode == "llm_moderated"
+        assert built.game.moderation.moderator_agent_id == "referee"
+        assert built.game.description == "Structured Connect Four."
+
     async def test_game_wizard_defaults_to_basic_level_with_progressive_tabs(self, tmp_path):
         from src.tui.app import OneOhOneApp
         from src.tui.screens.wizard import SetupWizardScreen
@@ -1009,6 +1037,11 @@ class TestLiveChatScreen:
             ),
             CompletionResult(
                 text="<thinking>Try the same move again clearly.</thinking>Column 4.",
+                usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+                model="test-model",
+            ),
+            CompletionResult(
+                text="Red drops into column 4.",
                 usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
                 model="test-model",
             ),

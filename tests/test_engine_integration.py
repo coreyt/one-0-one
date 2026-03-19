@@ -160,6 +160,16 @@ def _make_result(text: str = "Hello.") -> CompletionResult:
     )
 
 
+def _make_structured_result(column: int, *, text: str | None = None) -> CompletionResult:
+    payload = {"column": column}
+    return CompletionResult(
+        text=text or f'{{"column": {column}}}',
+        usage=TokenUsage(prompt_tokens=10, completion_tokens=5),
+        model="test-model",
+        parsed_action=payload,
+    )
+
+
 def _setup_event_capture(bus: EventBus) -> list:
     """
     Patch bus.emit to synchronously append events to a list.
@@ -345,7 +355,7 @@ class TestSessionLifecycle:
 
     async def test_plugin_game_emits_initial_authoritative_state(self):
         config = _make_connect_four_config(max_turns=1)
-        events = await _run_and_collect(config, mock_response="Opening narration.")
+        events = await _run_and_collect(config, mock_response='{"column": 4}')
 
         game_state_events = [e for e in events if e.type == "GAME_STATE"]
         assert len(game_state_events) >= 1
@@ -518,7 +528,7 @@ class TestMessageRouting:
         config = _make_connect_four_config(max_turns=2)
         events = await _run_and_collect(
             config,
-            mock_response=["Opening narration.", "Column 4."],
+            mock_response=['{"column": 4}', "Referee: Red opens in the center."],
         )
 
         game_state_events = [e for e in events if e.type == "GAME_STATE"]
@@ -530,6 +540,98 @@ class TestMessageRouting:
         final_state = authoritative_events[-1].full_state["custom"]["authoritative_state"]
         assert final_state["board"][5][3] == "R"
         assert final_state["active_player"] == "player_black"
+
+    async def test_plugin_game_prefers_structured_action_over_public_prose(self):
+        config = _make_connect_four_player_only_config(max_turns=1)
+        bus = EventBus()
+        events = _setup_event_capture(bus)
+
+        with patch("src.session.engine.LiteLLMClient") as MockClient:
+            MockClient.return_value.complete = AsyncMock(
+                return_value=_make_structured_result(
+                    4,
+                    text="I want the center column.",
+                )
+            )
+            with patch("src.session.engine.TranscriptWriter") as MockWriter:
+                MockWriter.return_value.record = MagicMock()
+                MockWriter.return_value.flush = AsyncMock()
+                engine = SessionEngine(config, bus)
+                await engine.run()
+
+        authoritative_events = [
+            e for e in events
+            if e.type == "GAME_STATE" and "authoritative_delta" in e.updates
+        ]
+        assert len(authoritative_events) == 1
+        final_state = authoritative_events[-1].full_state["custom"]["authoritative_state"]
+        assert final_state["board"][5][3] == "R"
+
+    async def test_plugin_game_runs_referee_after_player_move_without_making_referee_authoritative(self):
+        config = _make_connect_four_config(max_turns=3)
+        bus = EventBus()
+        events = _setup_event_capture(bus)
+        completions = [
+            _make_structured_result(4),
+            _make_result("Red claims the center."),
+            _make_structured_result(5),
+        ]
+
+        with patch("src.session.engine.LiteLLMClient") as MockClient:
+            MockClient.return_value.complete = AsyncMock(side_effect=completions)
+            with patch("src.session.engine.TranscriptWriter") as MockWriter:
+                MockWriter.return_value.record = MagicMock()
+                MockWriter.return_value.flush = AsyncMock()
+                engine = SessionEngine(config, bus)
+                await engine.run()
+
+        turn_events = [e for e in events if e.type == "TURN"]
+        assert turn_events[0].agent_ids == ["player_red"]
+        assert turn_events[1].agent_ids == ["referee"]
+        assert turn_events[2].agent_ids == ["player_black"]
+        authoritative_events = [
+            e for e in events
+            if e.type == "GAME_STATE" and "authoritative_delta" in e.updates
+        ]
+        assert len(authoritative_events) == 2
+
+    async def test_plugin_game_emits_final_referee_narration_then_ends_after_win(self):
+        config = _make_connect_four_config(max_turns=20)
+        bus = EventBus()
+        events = _setup_event_capture(bus)
+        player_columns = iter([1, 1, 2, 2, 3, 3, 4])
+
+        async def complete_side_effect(**kwargs):
+            messages = kwargs["messages"]
+            combined = "\n".join(
+                message.get("content", "")
+                for message in messages
+                if isinstance(message, dict)
+            )
+            if "role=presentation_referee" in combined:
+                return _make_result("Referee update.")
+            return _make_structured_result(next(player_columns))
+
+        with patch("src.session.engine.LiteLLMClient") as MockClient:
+            MockClient.return_value.complete = AsyncMock(side_effect=complete_side_effect)
+            with patch("src.session.engine.TranscriptWriter") as MockWriter:
+                MockWriter.return_value.record = MagicMock()
+                MockWriter.return_value.flush = AsyncMock()
+                engine = SessionEngine(config, bus)
+                final_state = await engine.run()
+
+        turn_events = [e for e in events if e.type == "TURN"]
+        assert turn_events[-1].agent_ids == ["referee"]
+        end_event = next(e for e in events if e.type == "SESSION_END")
+        assert end_event.reason == "win_condition"
+        last_game_state = [e for e in events if e.type == "GAME_STATE"][-1]
+        assert last_game_state.full_state["custom"]["authoritative_state"]["winner"] == "player_red"
+        end_index = next(i for i, e in enumerate(events) if e.type == "SESSION_END")
+        assert not any(
+            e.type == "TURN" and e.agent_ids and e.agent_ids[0].startswith("player_")
+            for e in events[end_index + 1:]
+        )
+        assert final_state.end_reason == "win_condition"
 
     async def test_plugin_game_authoritative_win_ends_session(self):
         agents = [

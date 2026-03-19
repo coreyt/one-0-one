@@ -262,6 +262,45 @@ class TestSystemPrompt:
         state.game_state.custom["authoritative_state"] = {"active_player": "player_red"}
         state.game_state.custom["visible_states"] = {
             "player_red": {
+                "viewer_id": "player_red",
+                "payload": {
+                    "board": [["." for _ in range(7)] for _ in range(6)],
+                    "active_player": "player_red",
+                    "winner": None,
+                    "is_draw": False,
+                    "move_count": 0,
+                },
+            }
+        }
+        state.game_state.custom["legal_actions"] = {
+            "player_red": [{"action_type": "drop_disc", "input_schema": {"column": [1, 2, 3, 4, 5, 6, 7]}}],
+        }
+
+        system = router.build_context("player_red", state)[1]["content"]
+        assert "board:" in system
+        assert ". . . . . . ." in system
+        assert "┌" not in system
+        assert "└" not in system
+
+    def test_connect_four_player_context_includes_structured_move_contract(self):
+        config = SessionConfig.model_validate({
+            "title": "Connect Four",
+            "description": "Test",
+            "type": "games",
+            "setting": "game",
+            "topic": "Play Connect Four.",
+            "agents": [
+                {"id": "player_red", "name": "Red", "provider": "p", "model": "m", "role": "player"},
+                {"id": "player_black", "name": "Black", "provider": "p", "model": "m", "role": "player"},
+            ],
+            "game": GameConfig(plugin="connect_four", name="Connect Four").model_dump(),
+        })
+        router = ChannelRouter(config)
+        state = _make_state(config)
+        state.game_state.custom["game_type"] = "connect_four"
+        state.game_state.custom["authoritative_state"] = {"active_player": "player_red"}
+        state.game_state.custom["visible_states"] = {
+            "player_red": {
                 "board": [["." for _ in range(7)] for _ in range(6)],
                 "active_player": "player_red",
                 "winner": None,
@@ -274,7 +313,41 @@ class TestSystemPrompt:
         }
 
         system = router.build_context("player_red", state)[1]["content"]
-        assert "board:" in system
-        assert ". . . . . . ." in system
-        assert "┌" not in system
-        assert "└" not in system
+        assert 'response_schema={"column": <integer 1-7>}' in system
+        assert 'response_example={"column": 4}' in system
+
+    def test_connect_four_referee_context_is_presentation_only(self):
+        config = SessionConfig.model_validate({
+            "title": "Connect Four",
+            "description": "Test",
+            "type": "games",
+            "setting": "game",
+            "topic": "Play Connect Four.",
+            "agents": [
+                {"id": "referee", "name": "Referee", "provider": "p", "model": "m", "role": "moderator"},
+                {"id": "player_red", "name": "Red", "provider": "p", "model": "m", "role": "player"},
+                {"id": "player_black", "name": "Black", "provider": "p", "model": "m", "role": "player"},
+            ],
+            "game": GameConfig(plugin="connect_four", name="Connect Four").model_dump(),
+        })
+        router = ChannelRouter(config)
+        state = _make_state(config)
+        state.game_state.custom["game_type"] = "connect_four"
+        state.game_state.custom["authoritative_state"] = {"active_player": "player_black", "winner": None}
+        state.game_state.custom["visible_states"] = {
+            "referee": {
+                "viewer_id": "referee",
+                "payload": {
+                    "board": [["." for _ in range(7)] for _ in range(6)],
+                    "active_player": "player_black",
+                    "winner": None,
+                    "is_draw": False,
+                    "move_count": 1,
+                },
+            }
+        }
+        state.game_state.custom["legal_actions"] = {"referee": []}
+
+        system = router.build_context("referee", state)[1]["content"]
+        assert "role=presentation_referee" in system
+        assert "Do not choose moves" in system

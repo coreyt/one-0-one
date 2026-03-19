@@ -775,6 +775,11 @@ class SetupWizardScreen(Screen):
             # Game config (only for games type)
             game_data = None
             if session_type == "games":
+                base_game_data = (
+                    self._config.game.model_dump(mode="python", exclude_none=True)
+                    if self._config is not None and self._config.game is not None
+                    else {}
+                )
                 game_name = self.query_one("#input-game-name", Input).value.strip()
                 rules_text = self.query_one("#input-game-rules", TextArea).text.strip()
                 rules = [r.strip() for r in rules_text.splitlines() if r.strip()]
@@ -785,6 +790,7 @@ class SetupWizardScreen(Screen):
                 max_rounds = int(max_rounds_str) if max_rounds_str else None
                 hitl_compatible = self.query_one("#input-game-hitl", Switch).value
                 game_data = {
+                    **base_game_data,
                     "name": game_name or title,
                     "rules": rules,
                     "how_to_play": how_to_play,
@@ -884,6 +890,8 @@ class SetupWizardScreen(Screen):
                 "completion_signal": completion_signal,
                 "game": game_data,
             }
+            if self._config is not None and self._config.auto_assign_personalities is not None:
+                data["auto_assign_personalities"] = self._config.auto_assign_personalities
 
             config = SessionConfig.model_validate(data)
             self.query_one("#validation-error", Label).update("")

@@ -69,7 +69,7 @@ For plugin-backed games:
 - Treat the authoritative game view as canonical, even if prior chat conflicts with it.
 - Ignore meta-confusion about names, roles, or story.
 - Focus on gameplay only.
-- When choosing a move, respond in the minimal format requested by your game prompt."""
+- If your game prompt gives you a structured response contract, follow it exactly."""
 
 
 def _build_system_prompt(agent: "AgentConfig", config: "SessionConfig") -> str:
@@ -168,31 +168,57 @@ class ChannelRouter:
         legal_actions = custom.get("legal_actions", {})
         viewer_state = visible_states.get(agent_id) if isinstance(visible_states, dict) else None
         viewer_actions = legal_actions.get(agent_id) if isinstance(legal_actions, dict) else None
+        agent = self._agent_configs[agent_id]
+        viewer_payload = (
+            viewer_state.get("payload")
+            if isinstance(viewer_state, dict) and isinstance(viewer_state.get("payload"), dict)
+            else viewer_state
+        )
 
         import json
 
         payload = {
-            "visible_state": viewer_state,
+            "visible_state": viewer_payload,
             "legal_actions": viewer_actions or [],
         }
-        if custom.get("game_type") == "connect_four" and isinstance(viewer_state, dict):
-            board = viewer_state.get("board")
+        if custom.get("game_type") == "connect_four" and isinstance(viewer_payload, dict):
+            board = viewer_payload.get("board")
             if isinstance(board, list):
                 rendered_board = render_connect_four_board(
                     board,
                     bordered=False,
                     empty_cell=".",
                 )
-                details = [
-                    "[Authoritative game view]",
-                    f"active_player={viewer_state.get('active_player')}",
-                    f"winner={viewer_state.get('winner')}",
-                    f"is_draw={viewer_state.get('is_draw')}",
-                    f"move_count={viewer_state.get('move_count')}",
-                    "board:",
-                    rendered_board,
-                    f"legal_actions={json.dumps(payload['legal_actions'])}",
-                ]
+                details = ["[Authoritative game view]"]
+                if agent.role == "moderator":
+                    details.extend(
+                        [
+                            "role=presentation_referee",
+                            "Narrate only the authoritative state shown here.",
+                            "Do not choose moves, decide legality, or infer a winner from chat.",
+                            "If winner or is_draw is set, announce that engine-determined result plainly.",
+                        ]
+                    )
+                else:
+                    details.extend(
+                        [
+                            "response_schema={\"column\": <integer 1-7>}",
+                            "response_example={\"column\": 4}",
+                            "Return exactly one JSON object and no surrounding prose.",
+                            "Any extra narration or identity talk may be ignored or rejected.",
+                        ]
+                    )
+                details.extend(
+                    [
+                        f"active_player={viewer_payload.get('active_player')}",
+                        f"winner={viewer_payload.get('winner')}",
+                        f"is_draw={viewer_payload.get('is_draw')}",
+                        f"move_count={viewer_payload.get('move_count')}",
+                        "board:",
+                        rendered_board,
+                        f"legal_actions={json.dumps(payload['legal_actions'])}",
+                    ]
+                )
                 return {
                     "role": "system",
                     "content": "\n".join(details),

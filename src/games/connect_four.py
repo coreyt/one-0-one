@@ -300,6 +300,20 @@ class ConnectFourGame:
             payload={"column": int(match.group(1))},
         )
 
+    def parse_action_payload(self, payload: dict[str, Any]) -> GameAction | None:
+        """Build a typed action from structured player output."""
+        column = payload.get("column")
+        if isinstance(column, str):
+            column = column.strip()
+            if column.isdigit():
+                column = int(column)
+        if not isinstance(column, int) or isinstance(column, bool):
+            return None
+        return GameAction(
+            action_type="drop_disc",
+            payload={"column": column},
+        )
+
     @staticmethod
     def _drop_row(board: list[list[str]], column: int) -> int:
         for row in range(len(board) - 1, -1, -1):

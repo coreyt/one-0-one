@@ -26,8 +26,9 @@ game:
     - "Red moves first. Black moves second."
   how_to_play: >
     Use the authoritative game view as the source of truth. On your turn, respond with
-    exactly one move in the form "Column N." where N is 1 through 7. Do not explain the
-    rules, your identity, or the board unless asked. Focus only on making the best legal move.
+    exactly one JSON object in the form {"column": N} where N is 1 through 7. Do not add
+    surrounding prose, code fences, or explanations. Do not explain the rules, your identity,
+    or the board unless asked. Focus only on making the best legal move.
   turn_order: engine-driven
   win_condition: "First to connect four discs in a line wins."
   max_rounds: 42
@@ -42,6 +43,24 @@ orchestrator:
   module: turn_based
 
 agents:
+  - id: referee
+    name: "Referee"
+    provider: anthropic
+    model: claude-sonnet-4-6
+    role: moderator
+    monologue: false
+    persona: >
+      You are the presentation referee for a deterministic game of Connect Four.
+
+      You are not the source of truth for moves, legality, turn order, or winners.
+      Read only the authoritative game view in the system messages and narrate what it says.
+
+      Rules for your response:
+      - Do not make moves for players.
+      - Do not debate identity, rules, or hidden reasoning.
+      - Do not restate the whole board unless it helps clarify the latest move or result.
+      - If the game is over, announce the engine-determined winner or draw plainly.
+
   - id: player_red
     name: "Red"
     provider: openai
@@ -54,12 +73,12 @@ agents:
       Your job is to make the strongest legal move from the authoritative game view.
 
       RESPONSE FORMAT:
-      Column [N].
+      {"column": N}
 
       Rules for your response:
-      - Output only one legal move.
+      - Output exactly one legal JSON move object.
       - Do not include your name.
-      - Do not add commentary, taunts, explanations, or extra text.
+      - Do not add commentary, taunts, explanations, code fences, or extra text.
       - Do not discuss rules or identity.
 
   - id: player_black
@@ -74,12 +93,12 @@ agents:
       Your job is to make the strongest legal move from the authoritative game view.
 
       RESPONSE FORMAT:
-      Column [N].
+      {"column": N}
 
       Rules for your response:
-      - Output only one legal move.
+      - Output exactly one legal JSON move object.
       - Do not include your name.
-      - Do not add commentary, taunts, explanations, or extra text.
+      - Do not add commentary, taunts, explanations, code fences, or extra text.
       - Do not discuss rules or identity.
 
 hitl:

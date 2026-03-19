@@ -40,6 +40,7 @@ import structlog
 
 from src.channels.router import ChannelRouter
 from src.games import (
+    GameAction,
     GameRuntime,
     HybridAuditRecord,
     LLMModerationBackend,
@@ -252,7 +253,12 @@ class SessionEngine:
             if state.end_reason is not None:
                 break
 
-            if self._game_runtime is not None and self._game_runtime.is_terminal():
+            pending_presentation_agent_id = self._pending_presentation_agent_id(state)
+            if (
+                self._game_runtime is not None
+                and self._game_runtime.is_terminal()
+                and pending_presentation_agent_id is None
+            ):
                 end_event = self._make_end_event(state, "win_condition")
                 self._emit_event(end_event, state)
                 state.end_reason = end_event.reason
@@ -282,7 +288,12 @@ class SessionEngine:
             orch_input = OrchestratorInput(config=self._config, state=state)
             orch_output = self._orchestrate(orch_input)
 
-            if self._game_runtime is not None:
+            if pending_presentation_agent_id is not None:
+                orch_output.next_agents = [pending_presentation_agent_id]
+                orch_output.advance_turns = 0
+                orch_output.session_end = False
+                orch_output.end_reason = None
+            elif self._game_runtime is not None:
                 turn_context = self._game_runtime.turn_context()
                 if turn_context.active_actor_ids:
                     orch_output.next_agents = turn_context.active_actor_ids
@@ -492,6 +503,8 @@ class SessionEngine:
                 detail=str(exc),
             )
             self._emit_event(incident_event, state)
+            if self._pending_presentation_agent_id(state) == agent_id:
+                self._clear_pending_presentation(state)
             agent_state.status = "idle"
             return
 
@@ -514,6 +527,19 @@ class SessionEngine:
             if parsed.tags_found
             else (result.communication or parsed_communication_segments)
         )
+        should_apply_authoritative_action = self._should_apply_authoritative_action(agent_id)
+        structured_action = (
+            self._extract_structured_action(result, parsed.public_message)
+            if should_apply_authoritative_action
+            else None
+        )
+        if should_apply_authoritative_action and structured_action is not None:
+            communication_segments = [
+                CommunicationSegment(
+                    visibility="public",
+                    text=json.dumps(structured_action),
+                )
+            ]
         monologue_segments = list(result.monologue)
         seen_monologue_texts = {segment.text for segment in monologue_segments}
         for segment in parsed_monologue_segments:
@@ -581,14 +607,17 @@ class SessionEngine:
                 team_channel_id=agent_config.team,
             )
 
-        if self._game_runtime is not None:
+        if should_apply_authoritative_action:
             await self._apply_authoritative_game_action(
                 agent_id=agent_id,
                 agent_name=agent_config.name,
                 state=state,
+                parsed_action=structured_action,
                 parsed_public_message=parsed.public_message,
                 timestamp=now,
             )
+        elif self._pending_presentation_agent_id(state) == agent_id:
+            self._clear_pending_presentation(state)
 
         agent_state.status = "idle"
 
@@ -623,6 +652,8 @@ class SessionEngine:
         text = payload["text"].strip()
         channel_id = payload["channel_id"]
         if not text:
+            if self._pending_presentation_agent_id(state) == agent_id:
+                self._clear_pending_presentation(state)
             agent_state.status = "idle"
             return
 
@@ -646,14 +677,17 @@ class SessionEngine:
             turn=state.turn_number,
         )
 
-        if self._game_runtime is not None and channel_id == "public":
+        if self._should_apply_authoritative_action(agent_id) and channel_id == "public":
             await self._apply_authoritative_game_action(
                 agent_id=agent_id,
                 agent_name=agent_config.name,
                 state=state,
+                parsed_action=self._extract_structured_action(None, text),
                 parsed_public_message=text,
                 timestamp=now,
             )
+        elif self._pending_presentation_agent_id(state) == agent_id:
+            self._clear_pending_presentation(state)
 
         agent_state.status = "idle"
 
@@ -826,18 +860,85 @@ class SessionEngine:
         state.game_state.winner = authoritative.get("winner")
         state.game_state.is_over = self._game_runtime.is_terminal()
 
+    def _pending_presentation_agent_id(self, state: SessionState) -> str | None:
+        pending = state.game_state.custom.get("_pending_presentation_agent_id")
+        return pending if isinstance(pending, str) and pending else None
+
+    @staticmethod
+    def _clear_pending_presentation(state: SessionState) -> None:
+        state.game_state.custom.pop("_pending_presentation_agent_id", None)
+
+    def _presentation_agent_id(self) -> str | None:
+        if self._game_runtime is None:
+            return None
+        moderator = next(
+            (agent for agent in self._config.agents if agent.role == "moderator"),
+            None,
+        )
+        return moderator.id if moderator is not None else None
+
+    def _should_apply_authoritative_action(self, agent_id: str) -> bool:
+        if self._game_runtime is None:
+            return False
+        return agent_id in self._game_runtime.turn_context().active_actor_ids
+
+    def _extract_structured_action(
+        self,
+        result,
+        public_text: str,
+    ) -> dict[str, object] | None:
+        candidates: list[object] = []
+        if result is not None and result.parsed_action is not None:
+            candidates.append(result.parsed_action)
+        stripped = public_text.strip()
+        if stripped.startswith("{") and stripped.endswith("}"):
+            try:
+                candidates.append(json.loads(stripped))
+            except json.JSONDecodeError:
+                pass
+        for candidate in candidates:
+            if isinstance(candidate, dict):
+                return candidate
+        return None
+
+    def _resolve_authoritative_action(
+        self,
+        parsed_action: dict[str, object] | None,
+        parsed_public_message: str,
+    ) -> GameAction | None:
+        if self._game_runtime is None:
+            return None
+
+        if isinstance(parsed_action, dict):
+            parser = getattr(self._game_runtime.game, "parse_action_payload", None)
+            if callable(parser):
+                action = parser(parsed_action)
+                if action is not None:
+                    return action
+            if (
+                isinstance(parsed_action.get("action_type"), str)
+                and isinstance(parsed_action.get("payload"), dict)
+            ):
+                return GameAction(
+                    action_type=parsed_action["action_type"],
+                    payload=parsed_action["payload"],
+                )
+
+        return self._game_runtime.parse_action_text(parsed_public_message)
+
     async def _apply_authoritative_game_action(
         self,
         *,
         agent_id: str,
         agent_name: str,
         state: SessionState,
+        parsed_action: dict[str, object] | None,
         parsed_public_message: str,
         timestamp: datetime,
     ) -> None:
         if self._game_runtime is None:
             return
-        action = self._game_runtime.parse_action_text(parsed_public_message)
+        action = self._resolve_authoritative_action(parsed_action, parsed_public_message)
         if action is None:
             self._handle_moderation_failure(
                 agent_id=agent_id,
@@ -892,6 +993,9 @@ class SessionEngine:
         self._game_runtime.state = decision.next_state
         self._reset_moderation_retry_count(state, agent_id)
         self._sync_authoritative_game_state(state)
+        presentation_agent_id = self._presentation_agent_id()
+        if presentation_agent_id is not None and presentation_agent_id != agent_id:
+            state.game_state.custom["_pending_presentation_agent_id"] = presentation_agent_id
         gs_event = GameStateEvent(
             timestamp=timestamp,
             turn_number=state.turn_number,
