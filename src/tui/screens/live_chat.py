@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from textual.app import ComposeResult
 from textual.screen import Screen
 from textual.widgets import Footer, Header
@@ -61,7 +63,14 @@ class LiveChatScreen(Screen):
         # Enable HITL input bar if configured
         if self._config.hitl.enabled:
             hitl_bar = self.query_one(HITLInputBar)
-            hitl_bar.enable(role=self._config.hitl.role)
+            role = self._human_display_name()
+            hitl_bar.enable(
+                role=role,
+                has_team=self._human_has_team_channel(),
+            )
+            if self._is_hitl_player_mode():
+                hitl_bar.display = False
+                self.query_one(MonologuePanel).display = False
         # Start the session in a background worker
         self.run_worker(self._run_session_worker(), exclusive=True)
 
@@ -80,15 +89,16 @@ class LiveChatScreen(Screen):
         # Wire EventBus subscriptions
         bus.stream() \
             .filter(lambda e: e.type == "CHANNEL_CREATED") \
-            .subscribe(channel_tabs.add_channel)
+            .subscribe(self._handle_channel_created)
 
         bus.stream() \
             .filter(lambda e: e.type == "MESSAGE") \
             .subscribe(self._handle_chat_message)
 
-        bus.stream() \
-            .filter(lambda e: e.type in ("MONOLOGUE", "TURN")) \
-            .subscribe(monologue_panel.handle_event)
+        if not self._is_hitl_player_mode():
+            bus.stream() \
+                .filter(lambda e: e.type in ("MONOLOGUE", "TURN")) \
+                .subscribe(monologue_panel.handle_event)
 
         bus.stream() \
             .filter(lambda e: e.type in ("TURN", "MESSAGE", "SESSION_END")) \
@@ -114,24 +124,45 @@ class LiveChatScreen(Screen):
     # EventBus handlers
     # ------------------------------------------------------------------
 
+    def _handle_channel_created(self, event) -> None:
+        if self._human_can_see_channel(event.channel_id, event.channel_type, event.members):
+            self.query_one(ChannelTabs).add_channel(event)
+
     def _handle_chat_message(self, event: MessageEvent) -> None:
-        self.query_one(ChannelTabs).append_message(event)
+        if self._is_message_visible_to_human(event):
+            self.query_one(ChannelTabs).append_message(event)
 
     def _on_system_event(self, event) -> None:
         if event.type == "RULE_VIOLATION":
+            if self._is_hitl_player_mode() and event.agent_id != self._config.hitl.participant_agent_id:
+                return
             text = f"Rule violation — {event.agent_id}: {event.rule}"
             self.query_one(ChannelTabs).append_system(text)
         elif event.type == "GAME_STATE":
-            updates = ", ".join(f"{k}={v}" for k, v in event.updates.items())
-            self.query_one(ChannelTabs).append_system(f"Game state updated: {updates}")
+            if self._is_hitl_player_mode():
+                summary = self._human_game_state_summary()
+                if summary:
+                    self.query_one(ChannelTabs).append_system(summary)
+            else:
+                updates = ", ".join(f"{k}={v}" for k, v in event.updates.items())
+                self.query_one(ChannelTabs).append_system(f"Game state updated: {updates}")
 
     def _on_turn(self, event: TurnEvent) -> None:
         # Update agent roster status
         roster = self.query_one(AgentRoster)
         for agent_id in event.agent_ids:
             roster.set_status(agent_id, "thinking")
+        if self._config.hitl.enabled:
+            hitl_bar = self.query_one(HITLInputBar)
+            if self._is_hitl_player_mode():
+                if self._config.hitl.participant_agent_id in event.agent_ids:
+                    hitl_bar.show_for_turn(has_team=self._human_has_team_channel())
+                else:
+                    hitl_bar.display = False
 
     def _on_session_end(self, event: SessionEndEvent) -> None:
+        if self._config.hitl.enabled:
+            self.query_one(HITLInputBar).display = False
         if event.reason == "error":
             self.notify(
                 "Session ended due to an error. Check the logs for details.",
@@ -171,6 +202,9 @@ class LiveChatScreen(Screen):
             self.notify("Session paused", timeout=2)
 
     def action_toggle_monologue(self) -> None:
+        if self._is_hitl_player_mode():
+            self.notify("Monologue is hidden in human player mode.", timeout=2)
+            return
         self.query_one(MonologuePanel).toggle()
 
     def action_end_session(self) -> None:
@@ -181,3 +215,82 @@ class LiveChatScreen(Screen):
 
     def action_go_back(self) -> None:
         self.action_end_session()
+
+    def _is_hitl_player_mode(self) -> bool:
+        return (
+            self._config.hitl.enabled
+            and self._config.type == "games"
+            and self._config.hitl.mode == "player"
+            and self._config.hitl.participant_agent_id is not None
+        )
+
+    def _human_display_name(self) -> str:
+        if self._is_hitl_player_mode():
+            participant_id = self._config.hitl.participant_agent_id
+            participant = next(
+                (agent for agent in self._config.agents if agent.id == participant_id),
+                None,
+            )
+            if participant is not None:
+                return participant.name
+        return self._config.hitl.role or "Human"
+
+    def _human_has_team_channel(self) -> bool:
+        if not self._is_hitl_player_mode():
+            return False
+        participant_id = self._config.hitl.participant_agent_id
+        participant = next(
+            (agent for agent in self._config.agents if agent.id == participant_id),
+            None,
+        )
+        return participant is not None and participant.team is not None
+
+    def _human_can_see_channel(
+        self,
+        channel_id: str,
+        channel_type: str,
+        members: list[str],
+    ) -> bool:
+        if not self._is_hitl_player_mode():
+            return True
+        if self._config.hitl.see_non_public_information:
+            return True
+        participant_id = self._config.hitl.participant_agent_id
+        if channel_id == "public" or channel_type == "public":
+            return True
+        if channel_type == "team":
+            return participant_id in members
+        if channel_type == "private":
+            return participant_id in members
+        return False
+
+    def _is_message_visible_to_human(self, event: MessageEvent) -> bool:
+        if not self._is_hitl_player_mode():
+            return True
+        if self._config.hitl.see_non_public_information:
+            return True
+        participant_id = self._config.hitl.participant_agent_id
+        if event.channel_id == "public":
+            return True
+        if event.recipient_id is not None:
+            return participant_id in {event.agent_id, event.recipient_id}
+        return any(
+            channel.id == event.channel_id
+            and channel.type == "team"
+            and participant_id in channel.members
+            for channel in self._config.channels
+        )
+
+    def _human_game_state_summary(self) -> str | None:
+        if self._engine is None:
+            return None
+        if self._engine._game_runtime is None:
+            return "Game state updated."
+        if self._config.hitl.see_non_public_information:
+            payload = self._engine._game_runtime.state.model_dump()
+            return f"Game state updated: {json.dumps(payload)}"
+        participant_id = self._config.hitl.participant_agent_id
+        if participant_id is None:
+            return "Game state updated."
+        visible_state = self._engine._game_runtime.visible_state(participant_id).model_dump()
+        return f"Your game view: {json.dumps(visible_state)}"

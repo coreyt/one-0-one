@@ -72,6 +72,9 @@ class ChannelConfig(BaseModel):
 class HITLConfig(BaseModel):
     enabled: bool = False
     role: str | None = None
+    mode: Literal["observer", "player"] = "observer"
+    participant_agent_id: str | None = None
+    see_non_public_information: bool = False
 
 
 class TranscriptConfig(BaseModel):
@@ -196,6 +199,26 @@ class SessionConfig(BaseModel):
                 raise ValueError(
                     f"agent '{agent.id}' team '{agent.team}' does not match "
                     f"any team channel"
+                )
+
+        if self.hitl.see_non_public_information and not self.hitl.enabled:
+            raise ValueError(
+                "hitl see_non_public_information requires hitl.enabled=true"
+            )
+
+        if self.hitl.enabled and self.type == "games" and self.hitl.mode == "player":
+            if self.game is not None and not self.game.hitl_compatible:
+                raise ValueError(
+                    "game is not HITL compatible and cannot assign a human player seat"
+                )
+            if not self.hitl.participant_agent_id:
+                raise ValueError(
+                    "game HITL player mode requires hitl.participant_agent_id"
+                )
+            if self.hitl.participant_agent_id not in agent_ids:
+                raise ValueError(
+                    f"hitl participant_agent_id '{self.hitl.participant_agent_id}' "
+                    f"is not in the agents list"
                 )
 
         return self

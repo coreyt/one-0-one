@@ -80,6 +80,12 @@ _TRANSCRIPT_FORMATS = [
     ("Both", "both"),
 ]
 
+_SETUP_LEVELS = [
+    ("Basic", "basic"),
+    ("Intermediate", "intermediate"),
+    ("Advanced", "advanced"),
+]
+
 
 class AgentEditModal(ModalScreen[dict | None]):
     """Modal for editing a single agent's fields."""
@@ -170,6 +176,11 @@ class SetupWizardScreen(Screen):
     def __init__(self, config: SessionConfig | None = None) -> None:
         super().__init__()
         self._config = config
+        self._setup_level = (
+            "basic"
+            if (config is not None and config.type == "games")
+            else "advanced"
+        )
         self._wizard_agents: list[dict] = []
         if config:
             self._wizard_agents = [
@@ -178,6 +189,14 @@ class SetupWizardScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
+        with Horizontal(id="setup-level-bar"):
+            yield Label("Setup Level:", classes="field-label")
+            yield Select(
+                _SETUP_LEVELS,
+                value=self._setup_level,
+                id="input-setup-level",
+                allow_blank=False,
+            )
         yield Tabs(
             Tab("Topic (Metadata)", id="tab_topic"),
             Tab("Setting", id="tab_setting"),
@@ -205,6 +224,8 @@ class SetupWizardScreen(Screen):
         self._show_pane("topic")
         if self._config:
             self._populate_from_config()
+        self._apply_setup_level()
+        self._refresh_game_summary()
 
     def on_tabs_tab_activated(self, event: Tabs.TabActivated) -> None:
         if event.tab is None:
@@ -235,17 +256,22 @@ class SetupWizardScreen(Screen):
     def _build_topic_pane(self) -> None:
         pane = self.query_one("#topic-pane")
         pane.remove_children()
-        pane.mount(
+        pane.mount(Static(id="topic-title-section"))
+        title_section = self.query_one("#topic-title-section")
+        title_section.mount(
             Label(
                 "What this tab is for: name the session and optionally tweak the prompt topic shown to participants. "
                 "If you opened the wizard from a template, these fields are already seeded and you usually only change them if you want a variant run.",
                 classes="field-help",
             )
         )
-        pane.mount(Label("Session title:", classes="field-label"))
-        pane.mount(Input(placeholder="My Session", id="input-title"))
-        pane.mount(Label("Topic (Metadata):", classes="field-label"))
-        pane.mount(TextArea(id="input-topic"))
+        title_section.mount(Label("Session title:", classes="field-label"))
+        title_section.mount(Input(placeholder="My Session", id="input-title"))
+
+        pane.mount(Static(id="topic-metadata-section"))
+        metadata_section = self.query_one("#topic-metadata-section")
+        metadata_section.mount(Label("Topic (Metadata):", classes="field-label"))
+        metadata_section.mount(TextArea(id="input-topic"))
 
     def _build_setting_pane(self) -> None:
         pane = self.query_one("#setting-pane")
@@ -268,6 +294,12 @@ class SetupWizardScreen(Screen):
         pane.mount(Input(placeholder="e.g. 20", id="input-max-turns"))
         pane.mount(Label("Completion Signal:", classes="field-label"))
         pane.mount(Input(placeholder="e.g. WINS!", id="input-completion-signal"))
+
+        pane.mount(Static(id="game-summary-section"))
+        summary = self.query_one("#game-summary-section")
+        summary.mount(Label("━━ Game Summary ━━", classes="section-header"))
+        summary.mount(Static("", id="game-summary-body"))
+        summary.display = False
 
         # ── Game Configuration (conditional) ──
         pane.mount(Static(id="game-config-section"))
@@ -375,7 +407,8 @@ class SetupWizardScreen(Screen):
         pane.remove_children()
         pane.mount(
             Label(
-                "What this tab is for: optional human-in-the-loop participation. Leave HITL disabled unless you want a human to inject messages during the live session.",
+                "What this tab is for: optional human participation. For games, HITL means the human takes one existing player seat; "
+                "by default the human only sees what that seat can legitimately see.",
                 classes="field-help",
             )
         )
@@ -385,13 +418,36 @@ class SetupWizardScreen(Screen):
 
         pane.mount(Static(id="hitl-settings-section"))
         settings_sec = self.query_one("#hitl-settings-section")
-        settings_sec.mount(Label("Role:", classes="field-label"))
-        settings_sec.mount(Select(
+        settings_sec.mount(Static(id="hitl-role-section"))
+        role_sec = self.query_one("#hitl-role-section")
+        role_sec.mount(Label("Role:", classes="field-label"))
+        role_sec.mount(Select(
             _HITL_ROLES,
             value="The Caller",
             id="input-hitl-role",
             allow_blank=False,
         ))
+
+        settings_sec.mount(Static(id="hitl-player-seat-section"))
+        player_sec = self.query_one("#hitl-player-seat-section")
+        player_sec.mount(Label("Human Player Seat:", classes="field-label"))
+        participant_options = [
+            (agent.get("name", agent.get("id", "Agent")), agent.get("id", ""))
+            for agent in self._wizard_agents
+        ]
+        player_sec.mount(
+            Select(
+                participant_options,
+                value=participant_options[0][1] if participant_options else Select.BLANK,
+                id="input-hitl-participant-agent",
+                allow_blank=True,
+            )
+        )
+
+        settings_sec.mount(Static(id="hitl-visibility-section"))
+        vis_sec = self.query_one("#hitl-visibility-section")
+        vis_sec.mount(Label("See Non-Public Information:", classes="field-label"))
+        vis_sec.mount(Switch(value=False, id="input-hitl-see-non-public"))
         settings_sec.display = False
 
     # ------------------------------------------------------------------
@@ -404,18 +460,126 @@ class SetupWizardScreen(Screen):
             pane = self.query_one(f"#{p}-pane")
             pane.display = p == name
 
+    def _apply_setup_level(self) -> None:
+        is_game = self._is_game_session_type()
+        level = self._setup_level
+
+        tabs = self.query_one("#wizard-tabs", Tabs)
+        for tab_id in ("tab_agents", "tab_orchestrator"):
+            try:
+                tabs.query_one(f"#{tab_id}", Tab).display = False
+            except Exception:
+                pass
+
+        if is_game:
+            self._set_tab_visibility("tab_agents", level in {"intermediate", "advanced"})
+            self._set_tab_visibility("tab_orchestrator", level == "advanced")
+            self._set_section_visibility("#topic-metadata-section", level in {"intermediate", "advanced"})
+            self._set_section_visibility("#game-summary-section", True)
+            self._set_section_visibility("#game-config-section", level == "advanced")
+            self._set_section_visibility("#advanced-section", level == "advanced")
+            self._set_section_visibility("#transcript-section", level in {"intermediate", "advanced"})
+            self._set_section_visibility("#hitl-player-seat-section", self._is_hitl_enabled())
+            self._set_section_visibility(
+                "#hitl-visibility-section",
+                self._is_hitl_enabled() and level in {"intermediate", "advanced"},
+            )
+            self._set_section_visibility("#hitl-role-section", level == "advanced" and self._is_hitl_enabled())
+        else:
+            self._set_tab_visibility("tab_agents", True)
+            self._set_tab_visibility("tab_orchestrator", True)
+            self._set_section_visibility("#topic-metadata-section", True)
+            self._set_section_visibility("#game-summary-section", False)
+            self._set_section_visibility("#game-config-section", False)
+            self._set_section_visibility("#advanced-section", True)
+            self._set_section_visibility("#transcript-section", True)
+            self._set_section_visibility("#hitl-player-seat-section", False)
+            self._set_section_visibility("#hitl-visibility-section", False)
+            self._set_section_visibility("#hitl-role-section", self._is_hitl_enabled())
+
+        if level == "basic" and tabs.active in {"tab_agents", "tab_orchestrator"}:
+            tabs.active = "tab_topic"
+            self._show_pane("topic")
+        if level == "intermediate" and tabs.active == "tab_orchestrator":
+            tabs.active = "tab_topic"
+            self._show_pane("topic")
+
+    def _set_tab_visibility(self, tab_id: str, visible: bool) -> None:
+        try:
+            self.query_one("#wizard-tabs", Tabs).query_one(f"#{tab_id}", Tab).display = visible
+        except Exception:
+            pass
+
+    def _set_section_visibility(self, selector: str, visible: bool) -> None:
+        try:
+            self.query_one(selector).display = visible
+        except Exception:
+            pass
+
+    def _is_game_session_type(self) -> bool:
+        try:
+            return self.query_one("#input-type", Select).value == "games"
+        except Exception:
+            return bool(self._config is not None and self._config.type == "games")
+
+    def _is_hitl_enabled(self) -> bool:
+        try:
+            return bool(self.query_one("#input-hitl-enabled", Switch).value)
+        except Exception:
+            return bool(self._config is not None and self._config.hitl.enabled)
+
+    def _refresh_hitl_participant_options(self) -> None:
+        try:
+            select = self.query_one("#input-hitl-participant-agent", Select)
+        except Exception:
+            return
+        options = [
+            (agent.get("name", agent.get("id", "Agent")), agent.get("id", ""))
+            for agent in self._wizard_agents
+        ]
+        current = select.value
+        select.set_options(options)
+        if current not in {value for _, value in options}:
+            select.value = options[0][1] if options else Select.BLANK
+
+    def _refresh_game_summary(self) -> None:
+        try:
+            summary = self.query_one("#game-summary-body", Static)
+        except Exception:
+            return
+        if not self._is_game_session_type():
+            summary.update("")
+            self._set_section_visibility("#game-summary-section", False)
+            return
+        title = self.query_one("#input-game-name", Input).value.strip() or (
+            self._config.game.name if self._config and self._config.game else "Game"
+        )
+        win_condition = self.query_one("#input-game-win", Input).value.strip() or "Template default"
+        max_turns = self.query_one("#input-max-turns", Input).value.strip() or "Template default"
+        summary.update(
+            f"[bold]{title}[/bold]\n"
+            f"Use Basic to play with template defaults.\n"
+            f"Max turns: {max_turns}\n"
+            f"Win condition: {win_condition}"
+        )
+
     # ------------------------------------------------------------------
     # Reactive UI handlers
     # ------------------------------------------------------------------
 
     def on_select_changed(self, event: Select.Changed) -> None:
         select_id = event.select.id
-        if select_id == "input-type":
+        if select_id == "input-setup-level":
+            self._setup_level = str(event.value)
+            self._apply_setup_level()
+        elif select_id == "input-type":
             is_game = event.value == "games"
             try:
                 self.query_one("#game-config-section").display = is_game
             except Exception:
                 pass
+            self._apply_setup_level()
+            self._refresh_game_summary()
         elif select_id == "input-orch-type":
             is_python = event.value == "python"
             try:
@@ -431,6 +595,7 @@ class SetupWizardScreen(Screen):
                 self.query_one("#hitl-settings-section").display = event.value
             except Exception:
                 pass
+            self._apply_setup_level()
 
     # ------------------------------------------------------------------
     # Agent table management
@@ -470,6 +635,7 @@ class SetupWizardScreen(Screen):
             if table.cursor_row is not None and 0 <= table.cursor_row < len(self._wizard_agents):
                 self._wizard_agents.pop(table.cursor_row)
                 self._refresh_agents_table()
+                self._refresh_hitl_participant_options()
         elif btn == "btn-edit-agent":
             table = self.query_one("#agents-table", DataTable)
             if table.cursor_row is not None and 0 <= table.cursor_row < len(self._wizard_agents):
@@ -480,8 +646,11 @@ class SetupWizardScreen(Screen):
                     if result is not None:
                         self._wizard_agents[row_idx] = result
                         self._refresh_agents_table()
+                        self._refresh_hitl_participant_options()
 
                 self.app.push_screen(AgentEditModal(agent), on_modal_result)
+        if btn == "btn-add-agent":
+            self._refresh_hitl_participant_options()
 
     # ------------------------------------------------------------------
     # Populate from existing config
@@ -570,11 +739,19 @@ class SetupWizardScreen(Screen):
                 self.query_one("#hitl-settings-section").display = True
                 role = cfg.hitl.role or "The Caller"
                 self.query_one("#input-hitl-role", Select).value = role
+                if cfg.hitl.participant_agent_id:
+                    self.query_one("#input-hitl-participant-agent", Select).value = (
+                        cfg.hitl.participant_agent_id
+                    )
+                self.query_one("#input-hitl-see-non-public", Switch).value = (
+                    cfg.hitl.see_non_public_information
+                )
         except Exception:
             pass
 
         # Agents table
         self._refresh_agents_table()
+        self._refresh_game_summary()
 
     # ------------------------------------------------------------------
     # Config builder
@@ -645,8 +822,22 @@ class SetupWizardScreen(Screen):
             # HITL
             hitl_enabled = self.query_one("#input-hitl-enabled", Switch).value
             hitl_role = None
+            hitl_participant_agent_id = None
+            hitl_mode = "observer"
+            hitl_see_non_public = False
             if hitl_enabled:
-                hitl_role = self.query_one("#input-hitl-role", Select).value or None
+                if session_type == "games":
+                    hitl_mode = "player"
+                    hitl_participant_agent_id = (
+                        self.query_one("#input-hitl-participant-agent", Select).value or None
+                    )
+                    hitl_see_non_public = self.query_one(
+                        "#input-hitl-see-non-public", Switch
+                    ).value
+                    if self._setup_level == "advanced":
+                        hitl_role = self.query_one("#input-hitl-role", Select).value or None
+                else:
+                    hitl_role = self.query_one("#input-hitl-role", Select).value or None
 
             # Agents — use wizard agent list
             agents = self._wizard_agents
@@ -671,7 +862,13 @@ class SetupWizardScreen(Screen):
                 "orchestrator": orch_data,
                 "agents": agents,
                 "channels": channels,
-                "hitl": {"enabled": hitl_enabled, "role": hitl_role},
+                "hitl": {
+                    "enabled": hitl_enabled,
+                    "role": hitl_role,
+                    "mode": hitl_mode,
+                    "participant_agent_id": hitl_participant_agent_id,
+                    "see_non_public_information": hitl_see_non_public,
+                },
                 "transcript": {
                     "auto_save": auto_save,
                     "format": tx_format,

@@ -114,7 +114,18 @@ class TemplateDetailPanel(Widget):
         log.write("[bold yellow]━━ HITL ━━[/bold yellow]")
         if cfg.hitl.enabled:
             role = cfg.hitl.role or "participant"
-            log.write(f"  [green]Enabled[/green] — Role: {role}")
+            if cfg.hitl.mode == "player" and cfg.hitl.participant_agent_id:
+                visibility = (
+                    "seat + non-public"
+                    if cfg.hitl.see_non_public_information
+                    else "seat only"
+                )
+                log.write(
+                    f"  [green]Enabled[/green] — Player seat: {cfg.hitl.participant_agent_id} "
+                    f"({visibility})"
+                )
+            else:
+                log.write(f"  [green]Enabled[/green] — Role: {role}")
         else:
             log.write("  [dim]Disabled[/dim]")
         log.write("")

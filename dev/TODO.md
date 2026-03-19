@@ -52,6 +52,8 @@ Last updated: 2026-03-18
 - [x] Integrate plugin-backed deterministic Connect Four into `SessionEngine`
 - [x] Remove moderator dependency from plugin-backed deterministic Connect Four flow
 - [x] Clean plugin-backed prompt context to use authoritative visible state and legal actions
+- [x] Add progressive `Basic` / `Intermediate` / `Advanced` setup levels for game templates in the TUI wizard
+- [x] Rework game HITL into a human-owned player seat with seat-scoped visibility by default
 
 ## Notes
 
@@ -68,3 +70,4 @@ Last updated: 2026-03-18
 - The current `tests/test_web_api_e2e.py` file still only exercises the optional web/API plumbing that exists in the repo, and is not the primary proof of product-critical game play.
 - The LLM-moderated path is now wired to a real provider-backed moderator in the live session path and is covered by engine integration and session-runner E2E tests.
 - Provider-native monologue is now proven in a real game session.
+- Game sessions can now assign a human to an existing player seat; the engine waits for that seat's turn, records the move under the claimed agent ID, and the TUI hides monologue plus non-seat/private information unless the explicit override is enabled.

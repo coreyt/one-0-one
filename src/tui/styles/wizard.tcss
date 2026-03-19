@@ -6,6 +6,16 @@ SetupWizardScreen {
     layout: vertical;
 }
 
+#setup-level-bar {
+    height: auto;
+    padding: 0 2;
+}
+
+#setup-level-bar .field-label {
+    margin-top: 0;
+    margin-right: 1;
+}
+
 #wizard-tabs {
     height: 3;
 }
@@ -68,6 +78,7 @@ SetupWizardScreen {
 }
 
 /* Game config section */
+#game-summary-section,
 #game-config-section {
     padding: 0;
     border-top: solid $panel;
@@ -83,6 +94,9 @@ SetupWizardScreen {
 }
 
 /* HITL settings section */
-#hitl-settings-section {
+#hitl-settings-section,
+#hitl-role-section,
+#hitl-player-seat-section,
+#hitl-visibility-section {
     padding: 0;
 }

@@ -106,6 +106,8 @@ class SessionEngine:
             if config.game is not None and config.game.plugin
             else None
         )
+        self._pending_hitl_turn_inputs: asyncio.Queue[dict[str, str]] = asyncio.Queue()
+        self._awaiting_hitl_turn = False
         # Pause gate — cleared when paused, set when running
         self._resume_event = asyncio.Event()
         self._resume_event.set()
@@ -359,13 +361,20 @@ class SessionEngine:
             if is_parallel:
                 await asyncio.gather(
                     *[
-                        self._run_agent(agent_id, state, is_parallel=True)
+                        (
+                            self._run_human_turn(agent_id, state, is_parallel=True)
+                            if self._is_human_player_agent(agent_id)
+                            else self._run_agent(agent_id, state, is_parallel=True)
+                        )
                         for agent_id in orch_output.next_agents
                     ]
                 )
             else:
                 for agent_id in orch_output.next_agents:
-                    await self._run_agent(agent_id, state, is_parallel=False)
+                    if self._is_human_player_agent(agent_id):
+                        await self._run_human_turn(agent_id, state, is_parallel=False)
+                    else:
+                        await self._run_agent(agent_id, state, is_parallel=False)
 
             # Only advance the turn counter if at least one agent produced output
             # (a MESSAGE or MONOLOGUE event).  A pure timeout/error produces neither,
@@ -566,6 +575,71 @@ class SessionEngine:
 
         agent_state.status = "idle"
 
+    async def _run_human_turn(
+        self,
+        agent_id: str,
+        state: SessionState,
+        is_parallel: bool = False,
+    ) -> None:
+        """Wait for and process a human-controlled player-seat turn."""
+        agent_config = self._config.agents[
+            next(i for i, a in enumerate(self._config.agents) if a.id == agent_id)
+        ]
+        agent_state = state.agents[agent_id]
+        agent_state.status = "awaiting_human"
+        self._awaiting_hitl_turn = True
+        self._resume_event.clear()
+        state.is_paused = True
+        log.info(
+            "session.waiting_for_hitl_turn",
+            agent_id=agent_id,
+            turn=state.turn_number,
+        )
+
+        try:
+            payload = await self._pending_hitl_turn_inputs.get()
+        finally:
+            self._awaiting_hitl_turn = False
+            self._resume_event.set()
+            state.is_paused = False
+
+        text = payload["text"].strip()
+        channel_id = payload["channel_id"]
+        if not text:
+            agent_state.status = "idle"
+            return
+
+        now = datetime.now(UTC)
+        event = MessageEvent(
+            timestamp=now,
+            turn_number=state.turn_number,
+            session_id=self._session_id,
+            agent_id=agent_id,
+            agent_name=agent_config.name,
+            model="human",
+            channel_id=channel_id,
+            text=text,
+            is_parallel=is_parallel,
+        )
+        self._emit_event(event, state)
+        log.info(
+            "session.hitl_turn_message",
+            agent_id=agent_id,
+            channel_id=channel_id,
+            turn=state.turn_number,
+        )
+
+        if self._game_runtime is not None and channel_id == "public":
+            await self._apply_authoritative_game_action(
+                agent_id=agent_id,
+                agent_name=agent_config.name,
+                state=state,
+                parsed_public_message=text,
+                timestamp=now,
+            )
+
+        agent_state.status = "idle"
+
     # ------------------------------------------------------------------
     # Control API (for UI layers)
     # ------------------------------------------------------------------
@@ -592,6 +666,18 @@ class SessionEngine:
         so it is included in subsequent agent contexts via the ChannelRouter.
         """
         if self._state is None:
+            return
+        if self._is_hitl_player_mode():
+            if not self._awaiting_hitl_turn:
+                log.info(
+                    "session.hitl_input_ignored",
+                    reason="not_waiting_for_human_turn",
+                    channel_id=channel_id,
+                )
+                return
+            self._pending_hitl_turn_inputs.put_nowait(
+                {"text": text, "channel_id": channel_id}
+            )
             return
         now = datetime.now(UTC)
         event = MessageEvent(
@@ -631,6 +717,19 @@ class SessionEngine:
             turn_number=state.turn_number,
             session_id=self._session_id,
             reason=safe_reason,  # type: ignore[arg-type]
+        )
+
+    def _is_hitl_player_mode(self) -> bool:
+        return (
+            self._config.hitl.enabled
+            and self._config.type == "games"
+            and self._config.hitl.mode == "player"
+            and self._config.hitl.participant_agent_id is not None
+        )
+
+    def _is_human_player_agent(self, agent_id: str) -> bool:
+        return self._is_hitl_player_mode() and (
+            self._config.hitl.participant_agent_id == agent_id
         )
 
     def _build_game_runtime(self, config: SessionConfig) -> GameRuntime:

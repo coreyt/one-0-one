@@ -1348,6 +1348,41 @@ class TestHITLInject:
         hitl = next(e for e in events if e.type == "MESSAGE" and e.agent_id == "hitl")
         assert hitl.channel_id == "team_red"
 
+    async def test_game_hitl_player_seat_waits_for_human_turn_and_uses_agent_id(self):
+        config = _make_connect_four_player_only_config(max_turns=2)
+        config.hitl = HITLConfig(
+            enabled=True,
+            mode="player",
+            participant_agent_id="player_red",
+        )
+        bus = EventBus()
+        events = _setup_event_capture(bus)
+
+        with patch("src.session.engine.LiteLLMClient") as MockClient:
+            MockClient.return_value.complete = AsyncMock(
+                return_value=CompletionResult(
+                    text="Column 5.",
+                    usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+                    model="test-model",
+                )
+            )
+            with patch("src.session.engine.TranscriptWriter") as MockWriter:
+                MockWriter.return_value.record = MagicMock()
+                MockWriter.return_value.flush = AsyncMock()
+                engine = SessionEngine(config, bus)
+
+                async def _submit_human_turn():
+                    await asyncio.sleep(0.05)
+                    engine.inject_hitl_message("Column 4.", "public")
+
+                await asyncio.gather(engine.run(), _submit_human_turn())
+
+        hitl_msgs = [e for e in events if e.type == "MESSAGE" and e.agent_id == "player_red"]
+        assert len(hitl_msgs) == 1
+        assert hitl_msgs[0].model == "human"
+        assert hitl_msgs[0].text == "Column 4."
+        assert MockClient.return_value.complete.await_count == 1
+
 
 # ---------------------------------------------------------------------------
 # Provider error handling

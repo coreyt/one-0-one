@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from textual.app import App, ComposeResult
-from textual.widgets import DataTable, Input, Label, RichLog, Tab, Tabs
+from textual.widgets import DataTable, Input, Label, RichLog, Select, Static, Switch, Tab, Tabs
 
 from src.session.config import AgentConfig
 from src.games import GameAction, GameRuntime, ModerationDecision, ScriptedModerationBackend
@@ -887,6 +887,113 @@ transcript:
                 await pilot.pause()
                 assert isinstance(app.screen, SetupWizardScreen)
                 assert app.screen.query_one("#input-title", Input).value == "Battleship"
+
+    async def test_game_wizard_defaults_to_basic_level_with_progressive_tabs(self, tmp_path):
+        from src.tui.app import OneOhOneApp
+        from src.tui.screens.wizard import SetupWizardScreen
+
+        template_yaml = """\
+title: "Connect Four"
+description: "A seeded template"
+type: games
+setting: game
+topic: "Play Connect Four."
+agents:
+  - id: player_red
+    name: Alex
+    provider: openai
+    model: gpt-4o
+    role: player
+  - id: player_black
+    name: Sasha
+    provider: google
+    model: gemini-2.5-flash
+    role: player
+game:
+  plugin: connect_four
+  name: "Connect Four"
+orchestrator:
+  type: python
+  module: turn_based
+hitl:
+  enabled: false
+transcript:
+  auto_save: false
+  format: markdown
+  path: /tmp/
+"""
+        (tmp_path / "connect-four.yaml").write_text(template_yaml)
+
+        with patch("src.tui.screens.browser.settings") as mock_settings:
+            mock_settings.session_templates_path = str(tmp_path)
+            app = OneOhOneApp()
+            async with app.run_test(headless=True, size=(100, 30)) as pilot:
+                await pilot.pause()
+                await pilot.pause()
+                await pilot.pause()
+                app.screen.action_new_session()
+                await pilot.pause()
+                assert isinstance(app.screen, SetupWizardScreen)
+                assert app.screen.query_one("#input-setup-level", Select).value == "basic"
+                tabs = app.screen.query_one("#wizard-tabs", Tabs)
+                assert tabs.query_one("#tab_agents", Tab).display is False
+                assert tabs.query_one("#tab_orchestrator", Tab).display is False
+                assert app.screen.query_one("#game-summary-section", Static).display is True
+                assert app.screen.query_one("#topic-metadata-section", Static).display is False
+
+    async def test_game_wizard_hitl_sections_expand_by_level(self, tmp_path):
+        from src.tui.app import OneOhOneApp
+        from src.tui.screens.wizard import SetupWizardScreen
+
+        template_yaml = """\
+title: "Battleship"
+description: "A seeded template"
+type: games
+setting: game
+topic: "Play Battleship."
+agents:
+  - id: captain_alpha
+    name: Commander Hayes
+    provider: openai
+    model: gpt-4o
+    role: player
+  - id: captain_beta
+    name: Captain Voss
+    provider: google
+    model: gemini-2.5-flash
+    role: player
+game:
+  plugin: battleship
+  name: "Battleship"
+orchestrator:
+  type: python
+  module: turn_based
+hitl:
+  enabled: false
+transcript:
+  auto_save: false
+  format: markdown
+  path: /tmp/
+"""
+        (tmp_path / "battleship.yaml").write_text(template_yaml)
+
+        with patch("src.tui.screens.browser.settings") as mock_settings:
+            mock_settings.session_templates_path = str(tmp_path)
+            app = OneOhOneApp()
+            async with app.run_test(headless=True, size=(100, 30)) as pilot:
+                await pilot.pause()
+                await pilot.pause()
+                await pilot.pause()
+                app.screen.action_new_session()
+                await pilot.pause()
+                assert isinstance(app.screen, SetupWizardScreen)
+                app.screen.query_one("#input-hitl-enabled", Switch).value = True
+                await pilot.pause()
+                assert app.screen.query_one("#hitl-player-seat-section", Static).display is True
+                assert app.screen.query_one("#hitl-visibility-section", Static).display is False
+                app.screen.query_one("#input-setup-level", Select).value = "intermediate"
+                await pilot.pause()
+                assert app.screen.query_one("#hitl-visibility-section", Static).display is True
 
 
 class TestLiveChatScreen:

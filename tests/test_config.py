@@ -176,6 +176,35 @@ class TestCrossFieldValidation:
         with pytest.raises(ValidationError, match="moderator_agent_id"):
             SessionConfig.model_validate(cfg)
 
+    def test_game_hitl_player_mode_requires_participant_agent_id(self):
+        cfg = self._base_config(
+            type="games",
+            game={"plugin": "connect_four", "name": "Connect Four"},
+            hitl={"enabled": True, "mode": "player"},
+        )
+        with pytest.raises(ValidationError, match="participant_agent_id"):
+            SessionConfig.model_validate(cfg)
+
+    def test_game_hitl_player_mode_requires_real_agent_id(self):
+        cfg = self._base_config(
+            type="games",
+            game={"plugin": "connect_four", "name": "Connect Four"},
+            hitl={
+                "enabled": True,
+                "mode": "player",
+                "participant_agent_id": "ghost",
+            },
+        )
+        with pytest.raises(ValidationError, match="ghost"):
+            SessionConfig.model_validate(cfg)
+
+    def test_hitl_non_public_visibility_requires_enabled(self):
+        cfg = self._base_config(
+            hitl={"enabled": False, "see_non_public_information": True},
+        )
+        with pytest.raises(ValidationError, match="see_non_public_information"):
+            SessionConfig.model_validate(cfg)
+
 
 class TestAgentConfig:
     def test_defaults(self):
