@@ -30,7 +30,13 @@ from typing import TYPE_CHECKING, Any
 import litellm
 
 from src.logging import get_logger
-from src.providers import CompletionResult, ProviderError, TokenUsage
+from src.providers import (
+    CommunicationSegment,
+    CompletionResult,
+    MonologueSegment,
+    ProviderError,
+    TokenUsage,
+)
 from src.settings import settings
 
 if TYPE_CHECKING:
@@ -81,6 +87,67 @@ def _supports_native_thinking(model: str) -> tuple[bool, str]:
     if provider in _REASONING_EFFORT_PROVIDERS and model_name.startswith("o"):
         return True, provider
     return False, provider
+
+
+def _extract_text(value: Any) -> str:
+    """Best-effort extraction of readable text from LiteLLM response fields."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text") or item.get("content")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "".join(parts)
+    if isinstance(value, dict):
+        text = value.get("text") or value.get("content")
+        if isinstance(text, str):
+            return text
+    return str(value)
+
+
+def _extract_native_monologue(message: Any) -> list[MonologueSegment]:
+    """Best-effort extraction of provider-native reasoning/thinking content."""
+    segments: list[MonologueSegment] = []
+    candidates: list[Any] = []
+
+    for attr in ("reasoning_content", "reasoning", "thinking", "reasoning_text"):
+        value = getattr(message, attr, None)
+        if value:
+            candidates.append(value)
+
+    if isinstance(message, dict):
+        for key in ("reasoning_content", "reasoning", "thinking", "reasoning_text"):
+            value = message.get(key)
+            if value:
+                candidates.append(value)
+
+    for candidate in candidates:
+        text = _extract_text(candidate).strip()
+        if text:
+            segments.append(
+                MonologueSegment(
+                    text=text,
+                    source="provider_native",
+                    redaction_status="raw",
+                )
+            )
+
+    # De-duplicate identical segments from overlapping provider fields.
+    deduped: list[MonologueSegment] = []
+    seen: set[str] = set()
+    for segment in segments:
+        if segment.text in seen:
+            continue
+        seen.add(segment.text)
+        deduped.append(segment)
+    return deduped
 
 
 class LiteLLMClient:
@@ -185,7 +252,9 @@ class LiteLLMClient:
             ) from exc
 
         duration_ms = int(time.monotonic() * 1000 - start_ms)
-        text = response.choices[0].message.content or ""
+        message = response.choices[0].message
+        text = _extract_text(getattr(message, "content", ""))
+        monologue = _extract_native_monologue(message)
         usage = TokenUsage(
             prompt_tokens=getattr(response.usage, "prompt_tokens", 0),
             completion_tokens=getattr(response.usage, "completion_tokens", 0),
@@ -201,4 +270,17 @@ class LiteLLMClient:
             duration_ms=duration_ms,
         )
 
-        return CompletionResult(text=text, usage=usage, model=actual_model)
+        communication = (
+            [CommunicationSegment(visibility="public", text=text)]
+            if text.strip()
+            else []
+        )
+
+        return CompletionResult(
+            text=text,
+            usage=usage,
+            model=actual_model,
+            communication=communication,
+            monologue=monologue,
+            metadata={"native_thinking_requested": native_thinking},
+        )

@@ -30,6 +30,7 @@ import re
 from dataclasses import dataclass, field
 
 from src.logging import get_logger
+from src.providers import CommunicationSegment, MonologueSegment
 
 log = get_logger(__name__)
 
@@ -167,3 +168,48 @@ class ResponseParser:
             )
 
         return result
+
+    @staticmethod
+    def build_communication_segments(
+        parsed: ParsedResponse,
+    ) -> list[CommunicationSegment]:
+        """Convert parsed tag output into structured communication segments."""
+        segments: list[CommunicationSegment] = []
+        if parsed.team_message:
+            segments.append(
+                CommunicationSegment(
+                    visibility="team",
+                    text=parsed.team_message,
+                )
+            )
+        if parsed.private_to and parsed.private_message:
+            segments.append(
+                CommunicationSegment(
+                    visibility="private",
+                    text=parsed.private_message,
+                    recipient=parsed.private_to,
+                )
+            )
+        if parsed.public_message:
+            segments.append(
+                CommunicationSegment(
+                    visibility="public",
+                    text=parsed.public_message,
+                )
+            )
+        return segments
+
+    @staticmethod
+    def build_monologue_segments(
+        parsed: ParsedResponse,
+    ) -> list[MonologueSegment]:
+        """Convert parsed tag output into structured monologue segments."""
+        if not parsed.thinking:
+            return []
+        return [
+            MonologueSegment(
+                text=parsed.thinking,
+                source="prompt_fallback",
+                redaction_status="raw",
+            )
+        ]

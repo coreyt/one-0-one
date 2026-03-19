@@ -216,6 +216,32 @@ class TestEdgeCases:
         assert "private" not in result.tags_found
 
 
+class TestStructuredSegments:
+    def test_build_communication_segments(self, parser):
+        raw = (
+            "<team>Team plan.</team>"
+            '<private to="Rex">Whisper.</private>'
+            "Public note."
+        )
+        parsed = parser.parse(raw)
+        segments = parser.build_communication_segments(parsed)
+
+        assert [segment.visibility for segment in segments] == [
+            "team", "private", "public"
+        ]
+        assert segments[0].text == "Team plan."
+        assert segments[1].recipient == "Rex"
+        assert segments[2].text == "Public note."
+
+    def test_build_monologue_segments(self, parser):
+        parsed = parser.parse("<thinking>Internal only.</thinking>Public.")
+        segments = parser.build_monologue_segments(parsed)
+
+        assert len(segments) == 1
+        assert segments[0].text == "Internal only."
+        assert segments[0].source == "prompt_fallback"
+
+
 class TestOrphanedClosingTag:
     """Model emits </thinking> without a matching opening tag (gpt-4o pattern)."""
 

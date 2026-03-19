@@ -8,7 +8,15 @@ max_turns: 160
 completion_signal: "WINS!"
 
 game:
+  plugin: battleship
   name: "Battleship"
+  moderation:
+    mode: deterministic
+    failure_policy:
+      actor_retry_limit: 2
+      actor_retry_exhaustion_action: forfeit
+      moderator_retry_limit: 2
+      moderator_retry_exhaustion_action: session_error
   rules:
     - "Each player has a 10×10 grid (columns A–J, rows 1–10)."
     - "Fleet: Carrier (5), Battleship (4), Cruiser (3), Submarine (3), Destroyer (2). Total: 17 cells."

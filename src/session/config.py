@@ -86,6 +86,44 @@ class GameRole(BaseModel):
     description: str
 
 
+class GameModerationConfig(BaseModel):
+    class GameModerationFailurePolicy(BaseModel):
+        actor_retry_limit: int = 2
+        actor_retry_exhaustion_action: Literal[
+            "skip_turn", "forfeit", "session_error"
+        ] = "forfeit"
+        moderator_retry_limit: int = 2
+        moderator_retry_exhaustion_action: Literal[
+            "skip_turn", "session_error"
+        ] = "session_error"
+
+        @model_validator(mode="after")
+        def validate_retry_limits(self) -> "GameModerationConfig.GameModerationFailurePolicy":
+            if self.actor_retry_limit < 0:
+                raise ValueError("actor_retry_limit must be >= 0")
+            if self.moderator_retry_limit < 0:
+                raise ValueError("moderator_retry_limit must be >= 0")
+            return self
+
+    mode: Literal["deterministic", "llm_moderated", "hybrid_audit"] = "deterministic"
+    moderator_agent_id: str | None = None
+    authority: Literal["hard", "advisory"] = "hard"
+    shadow_mode: Literal["deterministic", "llm_moderated"] | None = None
+    failure_policy: GameModerationFailurePolicy = Field(
+        default_factory=GameModerationFailurePolicy
+    )
+
+    @model_validator(mode="after")
+    def validate_mode_requirements(self) -> "GameModerationConfig":
+        if self.mode in {"llm_moderated", "hybrid_audit"} and not self.moderator_agent_id:
+            raise ValueError(
+                "game moderation mode requires moderator_agent_id for llm-moderated flows"
+            )
+        if self.mode == "hybrid_audit" and self.shadow_mode is None:
+            self.shadow_mode = "deterministic"
+        return self
+
+
 class LLMDefaults(BaseModel):
     """Session-level LLM defaults. Per-agent overrides planned for later."""
     temperature: float = 0.7
@@ -95,6 +133,7 @@ class LLMDefaults(BaseModel):
 
 
 class GameConfig(BaseModel):
+    plugin: str | None = None
     name: str
     description: str = ""
     rules: list[str] = Field(default_factory=list)
@@ -104,6 +143,7 @@ class GameConfig(BaseModel):
     win_condition: str = ""
     hitl_compatible: bool = True
     max_rounds: int | None = None
+    moderation: GameModerationConfig = Field(default_factory=GameModerationConfig)
 
 
 # ---------------------------------------------------------------------------

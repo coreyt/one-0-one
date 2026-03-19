@@ -115,6 +115,10 @@ class ChannelRouter:
             }
         ]
 
+        authority_message = self._build_authoritative_game_message(agent_id, state)
+        if authority_message is not None:
+            messages.append(authority_message)
+
         visible_count = 0
         for event in state.events:
             msg = self._event_to_message(event, agent_id)
@@ -129,6 +133,33 @@ class ChannelRouter:
             visible_events=visible_count,
         )
         return messages
+
+    def _build_authoritative_game_message(
+        self,
+        agent_id: str,
+        state: "SessionState",
+    ) -> dict | None:
+        """Inject authoritative game-runtime view for plugin-backed sessions."""
+        custom = state.game_state.custom
+        authoritative = custom.get("authoritative_state")
+        if not isinstance(authoritative, dict):
+            return None
+
+        visible_states = custom.get("visible_states", {})
+        legal_actions = custom.get("legal_actions", {})
+        viewer_state = visible_states.get(agent_id) if isinstance(visible_states, dict) else None
+        viewer_actions = legal_actions.get(agent_id) if isinstance(legal_actions, dict) else None
+
+        import json
+
+        payload = {
+            "visible_state": viewer_state,
+            "legal_actions": viewer_actions or [],
+        }
+        return {
+            "role": "system",
+            "content": f"[Authoritative game view] {json.dumps(payload)}",
+        }
 
     def _event_to_message(
         self,
@@ -153,6 +184,8 @@ class ChannelRouter:
                 return None
 
             case "GAME_STATE":
+                if self._uses_authoritative_game_runtime():
+                    return None
                 # Visible to all agents as a system message
                 import json
                 return {
@@ -198,6 +231,10 @@ class ChannelRouter:
 
         # Unknown channel — default deny
         return False
+
+    def _uses_authoritative_game_runtime(self) -> bool:
+        game = self._config.game
+        return bool(game is not None and game.plugin)
 
     @staticmethod
     def _channel_prefix(event: "SessionEvent") -> str:

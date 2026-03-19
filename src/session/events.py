@@ -87,6 +87,20 @@ class GameStateEvent(BaseModel):
     full_state: dict[str, Any]  # complete game state snapshot
 
 
+class HybridAuditEvent(BaseModel):
+    """Records one primary/shadow moderation comparison for experiment analysis."""
+
+    type: Literal["HYBRID_AUDIT"] = "HYBRID_AUDIT"
+    timestamp: datetime
+    turn_number: int
+    session_id: str
+    actor_id: str
+    proposed_action: dict[str, Any]
+    diverged: bool
+    primary_decision: dict[str, Any]
+    shadow_decision: dict[str, Any] | None = None
+
+
 class RuleViolationEvent(BaseModel):
     """An agent's response violated a game rule."""
 
@@ -154,6 +168,7 @@ SessionEvent = Annotated[
     | MonologueEvent
     | TurnEvent
     | GameStateEvent
+    | HybridAuditEvent
     | RuleViolationEvent
     | ChannelCreatedEvent
     | SessionEndEvent

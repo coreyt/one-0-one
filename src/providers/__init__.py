@@ -19,7 +19,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 
 
 @dataclass
@@ -30,6 +30,24 @@ class TokenUsage:
     @property
     def total_tokens(self) -> int:
         return self.prompt_tokens + self.completion_tokens
+
+
+@dataclass
+class CommunicationSegment:
+    """A single outward-facing communication segment produced by a model."""
+
+    visibility: Literal["public", "team", "private"]
+    text: str
+    recipient: str | None = None
+
+
+@dataclass
+class MonologueSegment:
+    """Internal reasoning captured separately from outward communication."""
+
+    text: str
+    source: Literal["provider_native", "prompt_fallback"]
+    redaction_status: Literal["raw", "filtered"] = "raw"
 
 
 @dataclass
@@ -44,6 +62,22 @@ class CompletionResult:
 
     model: str = ""
     """Actual model used (may differ from requested on router fallback)."""
+
+    communication: list[CommunicationSegment] = field(default_factory=list)
+    """Structured outward communication segments, if available."""
+
+    monologue: list[MonologueSegment] = field(default_factory=list)
+    """Structured monologue segments, if available."""
+
+    parsed_action: dict[str, Any] | None = None
+    """Structured action proposal extracted by the provider, if available."""
+
+    metadata: dict[str, Any] = field(default_factory=dict)
+    """Provider-specific response metadata retained for future engine use."""
+
+    @property
+    def has_structured_content(self) -> bool:
+        return bool(self.communication or self.monologue or self.parsed_action)
 
 
 class ProviderError(Exception):

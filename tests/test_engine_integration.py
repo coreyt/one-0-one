@@ -22,10 +22,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.providers import CompletionResult, TokenUsage
+from src.games import GameAction, HybridAuditRecord, ModerationDecision
+from src.providers import CompletionResult, MonologueSegment, TokenUsage
 from src.session.config import (
     AgentConfig,
     ChannelConfig,
+    GameConfig,
     HITLConfig,
     OrchestratorConfig,
     SessionConfig,
@@ -66,6 +68,90 @@ def _make_config(
     )
 
 
+def _make_connect_four_config(*, max_turns: int = 4) -> SessionConfig:
+    return SessionConfig(
+        title="Connect Four Integration",
+        description="Test game session",
+        type="games",
+        setting="game",
+        topic="Play Connect Four.",
+        agents=[
+            AgentConfig(
+                id="referee",
+                name="The Referee",
+                provider="anthropic",
+                model="claude-sonnet-4-6",
+                role="moderator",
+            ),
+            AgentConfig(
+                id="player_red",
+                name="Alex Mercer",
+                provider="openai",
+                model="gpt-4o",
+                role="player",
+            ),
+            AgentConfig(
+                id="player_black",
+                name="Sasha Kim",
+                provider="google",
+                model="gemini-2.5-flash",
+                role="player",
+            ),
+        ],
+        game=GameConfig(plugin="connect_four", name="Connect Four"),
+        orchestrator=OrchestratorConfig(type="python", module="turn_based"),
+        hitl=HITLConfig(enabled=False),
+        transcript=TranscriptConfig(auto_save=False, format="markdown", path="/tmp/"),
+        max_turns=max_turns,
+    )
+
+
+def _make_connect_four_player_only_config(*, max_turns: int = 4) -> SessionConfig:
+    return SessionConfig(
+        title="Connect Four Player Only",
+        description="Test game session without moderator actor",
+        type="games",
+        setting="game",
+        topic="Play Connect Four.",
+        agents=[
+            AgentConfig(
+                id="player_red",
+                name="Alex Mercer",
+                provider="openai",
+                model="gpt-4o",
+                role="player",
+            ),
+            AgentConfig(
+                id="player_black",
+                name="Sasha Kim",
+                provider="google",
+                model="gemini-2.5-flash",
+                role="player",
+            ),
+        ],
+        game=GameConfig(plugin="connect_four", name="Connect Four"),
+        orchestrator=OrchestratorConfig(type="python", module="turn_based"),
+        hitl=HITLConfig(enabled=False),
+        transcript=TranscriptConfig(auto_save=False, format="markdown", path="/tmp/"),
+        max_turns=max_turns,
+    )
+
+
+def _make_connect_four_llm_moderated_config(*, max_turns: int = 4) -> SessionConfig:
+    config = _make_connect_four_config(max_turns=max_turns)
+    config.game.moderation.mode = "llm_moderated"  # type: ignore[union-attr]
+    config.game.moderation.moderator_agent_id = "referee"  # type: ignore[union-attr]
+    return config
+
+
+def _make_connect_four_hybrid_audit_config(*, max_turns: int = 4) -> SessionConfig:
+    config = _make_connect_four_config(max_turns=max_turns)
+    config.game.moderation.mode = "hybrid_audit"  # type: ignore[union-attr]
+    config.game.moderation.moderator_agent_id = "referee"  # type: ignore[union-attr]
+    config.game.moderation.shadow_mode = "deterministic"  # type: ignore[union-attr]
+    return config
+
+
 def _make_result(text: str = "Hello.") -> CompletionResult:
     return CompletionResult(
         text=text,
@@ -93,6 +179,50 @@ def _setup_event_capture(bus: EventBus) -> list:
 
     bus.emit = capturing_emit
     return events
+
+
+class _RecordingModerationBackend:
+    def __init__(self, decision):
+        self.decision = decision
+        self.calls: list[tuple[str, GameAction]] = []
+
+    def moderate_turn(self, *, actor_id: str, proposed_action: GameAction):
+        self.calls.append((actor_id, proposed_action))
+        return self.decision
+
+    async def amoderate_turn(self, *, actor_id: str, proposed_action: GameAction):
+        return self.moderate_turn(actor_id=actor_id, proposed_action=proposed_action)
+
+
+class _RaisingModerationBackend:
+    def __init__(self, exc: Exception):
+        self.exc = exc
+        self.calls: list[tuple[str, GameAction]] = []
+
+    def moderate_turn(self, *, actor_id: str, proposed_action: GameAction):
+        self.calls.append((actor_id, proposed_action))
+        raise self.exc
+
+    async def amoderate_turn(self, *, actor_id: str, proposed_action: GameAction):
+        return self.moderate_turn(actor_id=actor_id, proposed_action=proposed_action)
+
+
+class _SequenceModerationBackend:
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+        self.calls: list[tuple[str, GameAction]] = []
+        self._index = 0
+
+    def moderate_turn(self, *, actor_id: str, proposed_action: GameAction):
+        self.calls.append((actor_id, proposed_action))
+        outcome = self.outcomes[self._index]
+        self._index += 1
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    async def amoderate_turn(self, *, actor_id: str, proposed_action: GameAction):
+        return self.moderate_turn(actor_id=actor_id, proposed_action=proposed_action)
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +328,50 @@ class TestSessionLifecycle:
         turn_numbers = [e.turn_number for e in turn_events]
         assert turn_numbers == sorted(turn_numbers)
 
+    async def test_plugin_game_emits_initial_authoritative_state(self):
+        config = _make_connect_four_config(max_turns=1)
+        events = await _run_and_collect(config, mock_response="Opening narration.")
+
+        game_state_events = [e for e in events if e.type == "GAME_STATE"]
+        assert len(game_state_events) >= 1
+        authoritative = game_state_events[0].full_state["custom"]["authoritative_state"]
+        assert authoritative["active_player"] == "player_red"
+        assert authoritative["players"] == ["player_red", "player_black"]
+
+    async def test_plugin_game_uses_authoritative_turn_actor_instead_of_orchestrator(self):
+        config = _make_connect_four_config(max_turns=1)
+        events = await _run_and_collect(config, mock_response="Column 4.")
+
+        turn_events = [e for e in events if e.type == "TURN"]
+        assert len(turn_events) >= 1
+        assert turn_events[0].agent_ids == ["player_red"]
+
+    async def test_plugin_game_without_moderator_starts_with_active_player(self):
+        config = _make_connect_four_player_only_config(max_turns=1)
+        events = await _run_and_collect(config, mock_response="Column 4.")
+
+        turn_events = [e for e in events if e.type == "TURN"]
+        assert len(turn_events) >= 1
+        assert turn_events[0].agent_ids == ["player_red"]
+
+    async def test_plugin_game_ignores_premature_orchestrator_end_reason(self):
+        from src.orchestrators import OrchestratorOutput
+
+        def bad_orchestrator(_input):
+            return OrchestratorOutput(session_end=True, end_reason="win_condition")
+
+        config = _make_connect_four_player_only_config(max_turns=2)
+        events = await _run_and_collect(
+            config,
+            mock_response=["Column 4.", "Column 4."],
+            patch_orchestrator=bad_orchestrator,
+        )
+
+        turn_events = [e for e in events if e.type == "TURN"]
+        assert len(turn_events) >= 1
+        end = next(e for e in events if e.type == "SESSION_END")
+        assert end.reason == "max_turns"
+
 
 # ---------------------------------------------------------------------------
 # Message routing tests
@@ -248,6 +422,39 @@ class TestMessageRouting:
         for msg in public_msgs:
             assert "Hidden thoughts." not in msg.text
 
+    async def test_native_monologue_result_emits_monologue_event(self):
+        config = _make_config(max_turns=1)
+        bus = EventBus()
+        events = _setup_event_capture(bus)
+
+        native_result = CompletionResult(
+            text="Visible reply.",
+            usage=TokenUsage(prompt_tokens=10, completion_tokens=5),
+            model="test-model",
+            monologue=[
+                MonologueSegment(
+                    text="Provider-native reasoning.",
+                    source="provider_native",
+                )
+            ],
+        )
+
+        with patch("src.session.engine.LiteLLMClient") as MockClient:
+            mi = MockClient.return_value
+            mi.complete = AsyncMock(return_value=native_result)
+
+            with patch("src.session.engine.TranscriptWriter") as MockWriter:
+                MockWriter.return_value.record = MagicMock()
+                MockWriter.return_value.flush = AsyncMock()
+                engine = SessionEngine(config, bus)
+                await engine.run()
+
+        mono_events = [e for e in events if e.type == "MONOLOGUE"]
+        public_msgs = [e for e in events if e.type == "MESSAGE" and e.channel_id == "public"]
+        assert len(mono_events) >= 1
+        assert mono_events[0].text == "Provider-native reasoning."
+        assert any(e.text == "Visible reply." for e in public_msgs)
+
     async def test_private_tag_sets_recipient(self):
         config = _make_config(max_turns=1)
         events = await _run_and_collect(
@@ -258,6 +465,655 @@ class TestMessageRouting:
         assert len(priv_msgs) >= 1
         assert priv_msgs[0].recipient_id == "b"
         assert "Just for Bob." in priv_msgs[0].text
+
+    async def test_plugin_game_applies_player_action_to_authoritative_state(self):
+        config = _make_connect_four_config(max_turns=2)
+        events = await _run_and_collect(
+            config,
+            mock_response=["Opening narration.", "Column 4."],
+        )
+
+        game_state_events = [e for e in events if e.type == "GAME_STATE"]
+        authoritative_events = [
+            e for e in game_state_events
+            if "authoritative_delta" in e.updates
+        ]
+        assert len(authoritative_events) >= 1
+        final_state = authoritative_events[-1].full_state["custom"]["authoritative_state"]
+        assert final_state["board"][5][3] == "R"
+        assert final_state["active_player"] == "player_black"
+
+    async def test_plugin_game_authoritative_win_ends_session(self):
+        agents = [
+            {"id": "player_red", "name": "Alex Mercer", "provider": "openai", "model": "gpt-4o", "role": "player", "team": "red"},
+            {"id": "player_black", "name": "Sasha Kim", "provider": "google", "model": "gemini-2.5-flash", "role": "player", "team": "black"},
+        ]
+        channels = [
+            ChannelConfig(id="red", type="team", members=["player_red"]),
+            ChannelConfig(id="black", type="team", members=["player_black"]),
+        ]
+        config = SessionConfig(
+            title="Connect Four Win",
+            description="Test authoritative win condition",
+            type="games",
+            setting="game",
+            topic="Play Connect Four.",
+            agents=[AgentConfig(**agent) for agent in agents],
+            channels=channels,
+            game=GameConfig(plugin="connect_four", name="Connect Four"),
+            orchestrator=OrchestratorConfig(type="python", module="basic"),
+            hitl=HITLConfig(enabled=False),
+            transcript=TranscriptConfig(auto_save=False, format="markdown", path="/tmp/"),
+            max_turns=20,
+        )
+
+        turns = [
+            "Column 1.",
+            "Column 1.",
+            "Column 2.",
+            "Column 2.",
+            "Column 3.",
+            "Column 3.",
+            "Column 4.",
+        ]
+
+        def plugin_orchestrator(input_):
+            active = input_.state.game_state.custom["authoritative_state"]["active_player"]
+            if not active:
+                from src.orchestrators import OrchestratorOutput
+                return OrchestratorOutput(next_agents=[])
+            from src.orchestrators import OrchestratorOutput
+            return OrchestratorOutput(next_agents=[active], advance_turns=1)
+
+        events = await _run_and_collect(
+            config,
+            mock_response=turns,
+            patch_orchestrator=plugin_orchestrator,
+        )
+
+        end_events = [e for e in events if e.type == "SESSION_END"]
+        assert len(end_events) == 1
+        assert end_events[0].reason == "win_condition"
+        last_game_state = [e for e in events if e.type == "GAME_STATE"][-1]
+        final_authoritative = last_game_state.full_state["custom"]["authoritative_state"]
+        assert final_authoritative["winner"] == "player_red"
+
+    async def test_plugin_game_context_includes_visible_state_and_legal_actions(self):
+        config = _make_connect_four_config(max_turns=1)
+        bus = EventBus()
+        captured_messages: list[list[dict]] = []
+
+        async def capture_complete(**kwargs):
+            captured_messages.append(kwargs["messages"])
+            return _make_result("Column 4.")
+
+        with patch("src.session.engine.LiteLLMClient") as MockClient:
+            MockClient.return_value.complete = AsyncMock(side_effect=capture_complete)
+            with patch("src.session.engine.TranscriptWriter") as MockWriter:
+                MockWriter.return_value.record = MagicMock()
+                MockWriter.return_value.flush = AsyncMock()
+                engine = SessionEngine(config, bus)
+                await engine.run()
+
+        assert len(captured_messages) >= 1
+        combined = "\n".join(m["content"] for m in captured_messages[0] if "content" in m)
+        assert "active_player" in combined
+        assert "player_red" in combined
+        assert "drop_disc" in combined
+        assert "column" in combined
+
+    async def test_plugin_game_context_uses_authoritative_view_without_legacy_game_state_dump(self):
+        config = _make_connect_four_config(max_turns=1)
+        bus = EventBus()
+        captured_messages: list[list[dict]] = []
+
+        async def capture_complete(**kwargs):
+            captured_messages.append(kwargs["messages"])
+            return _make_result("Column 4.")
+
+        with patch("src.session.engine.LiteLLMClient") as MockClient:
+            MockClient.return_value.complete = AsyncMock(side_effect=capture_complete)
+            with patch("src.session.engine.TranscriptWriter") as MockWriter:
+                MockWriter.return_value.record = MagicMock()
+                MockWriter.return_value.flush = AsyncMock()
+                engine = SessionEngine(config, bus)
+                await engine.run()
+
+        assert len(captured_messages) >= 1
+        system_contents = [
+            message["content"]
+            for message in captured_messages[0]
+            if message.get("role") == "system"
+        ]
+        assert any(content.startswith("[Authoritative game view]") for content in system_contents)
+        assert not any(content.startswith("[Game state update]") for content in system_contents)
+
+    async def test_plugin_game_without_moderator_applies_moves_and_can_end(self):
+        config = _make_connect_four_player_only_config(max_turns=20)
+        turns = [
+            "Column 1.",
+            "Column 1.",
+            "Column 2.",
+            "Column 2.",
+            "Column 3.",
+            "Column 3.",
+            "Column 4.",
+        ]
+
+        events = await _run_and_collect(config, mock_response=turns)
+
+        end_events = [e for e in events if e.type == "SESSION_END"]
+        assert len(end_events) == 1
+        assert end_events[0].reason == "win_condition"
+        last_game_state = [e for e in events if e.type == "GAME_STATE"][-1]
+        final_authoritative = last_game_state.full_state["custom"]["authoritative_state"]
+        assert final_authoritative["winner"] == "player_red"
+
+    async def test_plugin_game_deterministic_mode_executes_turn_via_moderation_backend(self):
+        config = _make_connect_four_config(max_turns=1)
+        bus = EventBus()
+        events = _setup_event_capture(bus)
+
+        with patch("src.session.engine.LiteLLMClient") as MockClient:
+            MockClient.return_value.complete = AsyncMock(return_value=_make_result("Column 4."))
+            with patch("src.session.engine.TranscriptWriter") as MockWriter:
+                MockWriter.return_value.record = MagicMock()
+                MockWriter.return_value.flush = AsyncMock()
+                engine = SessionEngine(config, bus)
+
+        runtime = engine._game_runtime
+        assert runtime is not None
+        action = GameAction(action_type="drop_disc", payload={"column": 4})
+        result = runtime.game.apply_action(runtime.state, "player_red", action)
+        backend = _RecordingModerationBackend(
+            ModerationDecision.from_apply_result(
+                mode="deterministic",
+                action=action,
+                result=result,
+            )
+        )
+        runtime.parse_action_text = MagicMock(return_value=action)
+        runtime.validate_action = MagicMock(side_effect=AssertionError("legacy validate path should not be used"))
+        runtime.apply_action = MagicMock(side_effect=AssertionError("legacy apply path should not be used"))
+        runtime.moderation_backend = backend
+
+        await engine.run()
+
+        assert backend.calls == [("player_red", action)]
+        authoritative_events = [
+            e for e in events
+            if e.type == "GAME_STATE" and "authoritative_delta" in e.updates
+        ]
+        assert len(authoritative_events) == 1
+        final_state = authoritative_events[-1].full_state["custom"]["authoritative_state"]
+        assert final_state["board"][5][3] == "R"
+        assert final_state["active_player"] == "player_black"
+
+    async def test_plugin_game_llm_moderated_mode_executes_turn_via_moderation_backend(self):
+        config = _make_connect_four_llm_moderated_config(max_turns=1)
+        bus = EventBus()
+        events = _setup_event_capture(bus)
+        deterministic_config = _make_connect_four_config(max_turns=1)
+        deterministic_engine = SessionEngine(deterministic_config, EventBus())
+        runtime = deterministic_engine._game_runtime
+        assert runtime is not None
+        action = GameAction(action_type="drop_disc", payload={"column": 4})
+        result = runtime.game.apply_action(runtime.state, "player_red", action)
+        backend = _RecordingModerationBackend(
+            ModerationDecision.from_apply_result(
+                mode="llm_moderated",
+                action=action,
+                result=result,
+            )
+        )
+        runtime.parse_action_text = MagicMock(return_value=action)
+        runtime.validate_action = MagicMock(side_effect=AssertionError("legacy validate path should not be used"))
+        runtime.apply_action = MagicMock(side_effect=AssertionError("legacy apply path should not be used"))
+        runtime.moderation_backend = backend
+
+        with patch("src.session.engine.GameRuntime.from_session_config", return_value=runtime):
+            with patch("src.session.engine.LiteLLMClient") as MockClient:
+                MockClient.return_value.complete = AsyncMock(return_value=_make_result("Column 4."))
+                with patch("src.session.engine.TranscriptWriter") as MockWriter:
+                    MockWriter.return_value.record = MagicMock()
+                    MockWriter.return_value.flush = AsyncMock()
+                    engine = SessionEngine(config, bus)
+                    await engine.run()
+
+        assert backend.calls == [("player_red", action)]
+        authoritative_events = [
+            e for e in events
+            if e.type == "GAME_STATE" and "authoritative_delta" in e.updates
+        ]
+        assert len(authoritative_events) == 1
+        assert authoritative_events[-1].full_state["custom"]["authoritative_state"]["board"][5][3] == "R"
+
+    async def test_plugin_game_llm_moderated_mode_runs_without_runtime_patch(self):
+        config = _make_connect_four_llm_moderated_config(max_turns=1)
+        bus = EventBus()
+        events = _setup_event_capture(bus)
+
+        async def complete_side_effect(**kwargs):
+            messages = kwargs["messages"]
+            if messages and messages[0]["role"] == "system":
+                if "authoritative game moderator" in messages[0]["content"]:
+                    return CompletionResult(
+                        text='{"accepted": true, "reason": "Accepted."}',
+                        usage=TokenUsage(prompt_tokens=8, completion_tokens=4),
+                        model="moderator-model",
+                        metadata={
+                            "moderation_decision": {
+                                "accepted": True,
+                                "reason": "Accepted.",
+                            }
+                        },
+                    )
+            return _make_result("Column 4.")
+
+        with patch("src.session.engine.LiteLLMClient") as MockClient:
+            MockClient.return_value.complete = AsyncMock(side_effect=complete_side_effect)
+            with patch("src.session.engine.TranscriptWriter") as MockWriter:
+                MockWriter.return_value.record = MagicMock()
+                MockWriter.return_value.flush = AsyncMock()
+                engine = SessionEngine(config, bus)
+                final_state = await engine.run()
+
+        authoritative_events = [
+            e for e in events
+            if e.type == "GAME_STATE" and "authoritative_delta" in e.updates
+        ]
+        assert len(authoritative_events) == 1
+        assert final_state.game_state.custom["authoritative_state"]["board"][5][3] == "R"
+        assert final_state.end_reason == "max_turns"
+
+    async def test_plugin_game_hybrid_audit_mode_executes_turn_via_primary_backend(self):
+        config = _make_connect_four_hybrid_audit_config(max_turns=1)
+        bus = EventBus()
+        events = _setup_event_capture(bus)
+        deterministic_config = _make_connect_four_config(max_turns=1)
+        deterministic_engine = SessionEngine(deterministic_config, EventBus())
+        runtime = deterministic_engine._game_runtime
+        assert runtime is not None
+        action = GameAction(action_type="drop_disc", payload={"column": 4})
+        result = runtime.game.apply_action(runtime.state, "player_red", action)
+        primary = ModerationDecision.from_apply_result(
+            mode="llm_moderated",
+            action=action,
+            result=result,
+        )
+        shadow = ModerationDecision(
+            accepted=False,
+            moderator_mode="deterministic",
+            next_state=runtime.state,
+            reason="Shadow backend rejected the move.",
+        )
+        backend = _RecordingModerationBackend(
+            HybridAuditRecord(
+                primary=primary,
+                shadow=shadow,
+                diverged=True,
+            )
+        )
+        runtime.parse_action_text = MagicMock(return_value=action)
+        runtime.validate_action = MagicMock(side_effect=AssertionError("legacy validate path should not be used"))
+        runtime.apply_action = MagicMock(side_effect=AssertionError("legacy apply path should not be used"))
+        runtime.moderation_backend = backend
+
+        with patch("src.session.engine.GameRuntime.from_session_config", return_value=runtime):
+            with patch("src.session.engine.LiteLLMClient") as MockClient:
+                MockClient.return_value.complete = AsyncMock(return_value=_make_result("Column 4."))
+                with patch("src.session.engine.TranscriptWriter") as MockWriter:
+                    MockWriter.return_value.record = MagicMock()
+                    MockWriter.return_value.flush = AsyncMock()
+                    engine = SessionEngine(config, bus)
+                    await engine.run()
+
+        assert backend.calls == [("player_red", action)]
+        authoritative_events = [
+            e for e in events
+            if e.type == "GAME_STATE" and "authoritative_delta" in e.updates
+        ]
+        assert len(authoritative_events) == 1
+        final_state = authoritative_events[-1].full_state["custom"]["authoritative_state"]
+        assert final_state["board"][5][3] == "R"
+
+    async def test_plugin_game_hybrid_audit_mode_emits_audit_event_and_persists_record(self):
+        config = _make_connect_four_hybrid_audit_config(max_turns=1)
+        bus = EventBus()
+        events = _setup_event_capture(bus)
+        deterministic_config = _make_connect_four_config(max_turns=1)
+        deterministic_engine = SessionEngine(deterministic_config, EventBus())
+        runtime = deterministic_engine._game_runtime
+        assert runtime is not None
+        action = GameAction(action_type="drop_disc", payload={"column": 4})
+        result = runtime.game.apply_action(runtime.state, "player_red", action)
+        primary = ModerationDecision.from_apply_result(
+            mode="llm_moderated",
+            action=action,
+            result=result,
+        )
+        shadow = ModerationDecision(
+            accepted=False,
+            moderator_mode="deterministic",
+            next_state=runtime.state,
+            reason="Shadow backend rejected the move.",
+        )
+        runtime.parse_action_text = MagicMock(return_value=action)
+        runtime.moderation_backend = _RecordingModerationBackend(
+            HybridAuditRecord(
+                primary=primary,
+                shadow=shadow,
+                diverged=True,
+            )
+        )
+
+        with patch("src.session.engine.GameRuntime.from_session_config", return_value=runtime):
+            with patch("src.session.engine.LiteLLMClient") as MockClient:
+                MockClient.return_value.complete = AsyncMock(return_value=_make_result("Column 4."))
+                with patch("src.session.engine.TranscriptWriter") as MockWriter:
+                    MockWriter.return_value.record = MagicMock()
+                    MockWriter.return_value.flush = AsyncMock()
+                    engine = SessionEngine(config, bus)
+                    final_state = await engine.run()
+
+        audit_events = [e for e in events if e.type == "HYBRID_AUDIT"]
+        assert len(audit_events) == 1
+        assert audit_events[0].actor_id == "player_red"
+        assert audit_events[0].diverged is True
+        assert audit_events[0].proposed_action["payload"]["column"] == 4
+        stored_records = final_state.game_state.custom["hybrid_audit_records"]
+        assert len(stored_records) == 1
+        assert stored_records[0]["actor_id"] == "player_red"
+        assert stored_records[0]["diverged"] is True
+
+    async def test_plugin_game_malformed_moderator_payload_becomes_rule_violation(self):
+        config = _make_connect_four_llm_moderated_config(max_turns=1)
+        bus = EventBus()
+        events = _setup_event_capture(bus)
+        deterministic_engine = SessionEngine(_make_connect_four_config(max_turns=1), EventBus())
+        runtime = deterministic_engine._game_runtime
+        assert runtime is not None
+        action = GameAction(action_type="drop_disc", payload={"column": 4})
+        runtime.parse_action_text = MagicMock(return_value=action)
+        runtime.moderation_backend = _RaisingModerationBackend(
+            ValueError(
+                "Malformed moderator payload; expected structured moderation decision with an 'accepted' field."
+            )
+        )
+
+        with patch("src.session.engine.GameRuntime.from_session_config", return_value=runtime):
+            with patch("src.session.engine.LiteLLMClient") as MockClient:
+                MockClient.return_value.complete = AsyncMock(return_value=_make_result("Column 4."))
+                with patch("src.session.engine.TranscriptWriter") as MockWriter:
+                    MockWriter.return_value.record = MagicMock()
+                    MockWriter.return_value.flush = AsyncMock()
+                    engine = SessionEngine(config, bus)
+                    final_state = await engine.run()
+
+        rv_events = [e for e in events if e.type == "RULE_VIOLATION"]
+        assert len(rv_events) == 3
+        assert "accepted" in rv_events[0].rule
+        assert rv_events[0].agent_id == "player_red"
+        assert final_state.game_state.custom["authoritative_state"]["board"][5][3] == "."
+        assert not any(
+            e.type == "GAME_STATE" and "authoritative_delta" in e.updates
+            for e in events
+        )
+        end_event = next(e for e in events if e.type == "SESSION_END")
+        assert end_event.reason == "error"
+
+    async def test_plugin_game_unusable_accepted_moderation_becomes_rule_violation(self):
+        config = _make_connect_four_llm_moderated_config(max_turns=1)
+        bus = EventBus()
+        events = _setup_event_capture(bus)
+        deterministic_engine = SessionEngine(_make_connect_four_config(max_turns=1), EventBus())
+        runtime = deterministic_engine._game_runtime
+        assert runtime is not None
+        action = GameAction(action_type="drop_disc", payload={"column": 4})
+        runtime.parse_action_text = MagicMock(return_value=action)
+        runtime.moderation_backend = _RaisingModerationBackend(
+            ValueError(
+                "Moderator accepted an action that cannot be applied without an explicit next_state: It is not this player's turn."
+            )
+        )
+
+        with patch("src.session.engine.GameRuntime.from_session_config", return_value=runtime):
+            with patch("src.session.engine.LiteLLMClient") as MockClient:
+                MockClient.return_value.complete = AsyncMock(return_value=_make_result("Column 4."))
+                with patch("src.session.engine.TranscriptWriter") as MockWriter:
+                    MockWriter.return_value.record = MagicMock()
+                    MockWriter.return_value.flush = AsyncMock()
+                    engine = SessionEngine(config, bus)
+                    final_state = await engine.run()
+
+        rv_events = [e for e in events if e.type == "RULE_VIOLATION"]
+        assert len(rv_events) == 3
+        assert "cannot be applied" in rv_events[0].rule
+        assert final_state.game_state.custom["authoritative_state"]["active_player"] == "player_red"
+        assert not any(
+            e.type == "GAME_STATE" and "authoritative_delta" in e.updates
+            for e in events
+        )
+        end_event = next(e for e in events if e.type == "SESSION_END")
+        assert end_event.reason == "error"
+
+    async def test_plugin_game_retries_same_actor_with_rule_violation_clarification(self):
+        config = _make_connect_four_llm_moderated_config(max_turns=3)
+        bus = EventBus()
+        events = _setup_event_capture(bus)
+        captured_messages: list[list[dict]] = []
+        deterministic_engine = SessionEngine(_make_connect_four_config(max_turns=3), EventBus())
+        runtime = deterministic_engine._game_runtime
+        assert runtime is not None
+        action = GameAction(action_type="drop_disc", payload={"column": 4})
+        result = runtime.game.apply_action(runtime.state, "player_red", action)
+        runtime.parse_action_text = MagicMock(return_value=action)
+        runtime.moderation_backend = _SequenceModerationBackend(
+            [
+                ValueError("Malformed moderator payload; expected structured moderation decision with an 'accepted' field."),
+                ModerationDecision.from_apply_result(
+                    mode="llm_moderated",
+                    action=action,
+                    result=result,
+                ),
+            ]
+        )
+
+        async def capture_complete(**kwargs):
+            captured_messages.append(kwargs["messages"])
+            return _make_result("Column 4.")
+
+        with patch("src.session.engine.GameRuntime.from_session_config", return_value=runtime):
+            with patch("src.session.engine.LiteLLMClient") as MockClient:
+                MockClient.return_value.complete = AsyncMock(side_effect=capture_complete)
+                with patch("src.session.engine.TranscriptWriter") as MockWriter:
+                    MockWriter.return_value.record = MagicMock()
+                    MockWriter.return_value.flush = AsyncMock()
+                    engine = SessionEngine(config, bus)
+                    await engine.run()
+
+        turn_events = [e for e in events if e.type == "TURN"]
+        assert len(turn_events) >= 2
+        assert turn_events[0].agent_ids == ["player_red"]
+        assert turn_events[1].agent_ids == ["player_red"]
+        assert len(captured_messages) >= 2
+        retry_context = "\n".join(
+            msg["content"] for msg in captured_messages[1] if "content" in msg
+        )
+        assert "[Rule violation]" in retry_context
+        authoritative_events = [
+            e for e in events
+            if e.type == "GAME_STATE" and "authoritative_delta" in e.updates
+        ]
+        assert len(authoritative_events) == 1
+        final_state = authoritative_events[-1].full_state["custom"]["authoritative_state"]
+        assert final_state["board"][5][3] == "R"
+
+    async def test_plugin_game_exceeding_retry_cap_ends_session_with_error(self):
+        config = _make_connect_four_llm_moderated_config(max_turns=5)
+        bus = EventBus()
+        events = _setup_event_capture(bus)
+        deterministic_engine = SessionEngine(_make_connect_four_config(max_turns=5), EventBus())
+        runtime = deterministic_engine._game_runtime
+        assert runtime is not None
+        action = GameAction(action_type="drop_disc", payload={"column": 4})
+        runtime.parse_action_text = MagicMock(return_value=action)
+        runtime.moderation_backend = _SequenceModerationBackend(
+            [
+                ValueError("Malformed moderator payload; expected structured moderation decision with an 'accepted' field."),
+                ValueError("Malformed moderator payload; expected structured moderation decision with an 'accepted' field."),
+                ValueError("Malformed moderator payload; expected structured moderation decision with an 'accepted' field."),
+            ]
+        )
+
+        with patch("src.session.engine.GameRuntime.from_session_config", return_value=runtime):
+            with patch("src.session.engine.LiteLLMClient") as MockClient:
+                MockClient.return_value.complete = AsyncMock(return_value=_make_result("Column 4."))
+                with patch("src.session.engine.TranscriptWriter") as MockWriter:
+                    MockWriter.return_value.record = MagicMock()
+                    MockWriter.return_value.flush = AsyncMock()
+                    engine = SessionEngine(config, bus)
+                    final_state = await engine.run()
+
+        rv_events = [e for e in events if e.type == "RULE_VIOLATION"]
+        assert len(rv_events) == 3
+        end_event = next(e for e in events if e.type == "SESSION_END")
+        assert end_event.reason == "error"
+        assert final_state.end_reason == "error"
+
+    async def test_plugin_game_unparsable_action_becomes_rule_violation_without_advancing_turn(self):
+        config = _make_connect_four_llm_moderated_config(max_turns=2)
+        bus = EventBus()
+        events = _setup_event_capture(bus)
+        deterministic_engine = SessionEngine(_make_connect_four_config(max_turns=2), EventBus())
+        runtime = deterministic_engine._game_runtime
+        assert runtime is not None
+        runtime.parse_action_text = MagicMock(return_value=None)
+
+        with patch("src.session.engine.GameRuntime.from_session_config", return_value=runtime):
+            with patch("src.session.engine.LiteLLMClient") as MockClient:
+                MockClient.return_value.complete = AsyncMock(
+                    side_effect=[
+                        _make_result("not a valid move"),
+                        _make_result("still not a valid move"),
+                        _make_result("yet another invalid move"),
+                    ]
+                )
+                with patch("src.session.engine.TranscriptWriter") as MockWriter:
+                    MockWriter.return_value.record = MagicMock()
+                    MockWriter.return_value.flush = AsyncMock()
+                    engine = SessionEngine(config, bus)
+                    final_state = await engine.run()
+
+        rv_events = [e for e in events if e.type == "RULE_VIOLATION"]
+        assert len(rv_events) == 3
+        assert "Could not parse" in rv_events[0].rule
+        turn_events = [e for e in events if e.type == "TURN"]
+        assert len(turn_events) == 3
+        assert all(e.turn_number == 0 for e in turn_events)
+        assert final_state.end_reason == "win_condition"
+        assert final_state.game_state.custom["authoritative_state"]["winner"] == "player_black"
+
+    async def test_plugin_game_actor_failure_can_skip_turn_on_retry_exhaustion(self):
+        config = _make_connect_four_llm_moderated_config(max_turns=1)
+        config.game.moderation.failure_policy.actor_retry_exhaustion_action = "skip_turn"  # type: ignore[union-attr]
+        bus = EventBus()
+        events = _setup_event_capture(bus)
+        deterministic_engine = SessionEngine(_make_connect_four_config(max_turns=1), EventBus())
+        runtime = deterministic_engine._game_runtime
+        assert runtime is not None
+        action = GameAction(action_type="drop_disc", payload={"column": 4})
+        runtime.parse_action_text = MagicMock(return_value=action)
+        runtime.moderation_backend = _SequenceModerationBackend(
+            [
+                ModerationDecision(
+                    accepted=False,
+                    moderator_mode="llm_moderated",
+                    next_state=runtime.state,
+                    reason="Illegal move.",
+                ),
+                ModerationDecision(
+                    accepted=False,
+                    moderator_mode="llm_moderated",
+                    next_state=runtime.state,
+                    reason="Illegal move.",
+                ),
+                ModerationDecision(
+                    accepted=False,
+                    moderator_mode="llm_moderated",
+                    next_state=runtime.state,
+                    reason="Illegal move.",
+                ),
+            ]
+        )
+
+        with patch("src.session.engine.GameRuntime.from_session_config", return_value=runtime):
+            with patch("src.session.engine.LiteLLMClient") as MockClient:
+                MockClient.return_value.complete = AsyncMock(return_value=_make_result("Column 4."))
+                with patch("src.session.engine.TranscriptWriter") as MockWriter:
+                    MockWriter.return_value.record = MagicMock()
+                    MockWriter.return_value.flush = AsyncMock()
+                    engine = SessionEngine(config, bus)
+                    final_state = await engine.run()
+
+        assert final_state.end_reason == "max_turns"
+        authoritative = final_state.game_state.custom["authoritative_state"]
+        assert authoritative["active_player"] == "player_black"
+        assert authoritative["board"][5][3] == "."
+        resolution = final_state.game_state.custom["moderation_resolutions"][-1]
+        assert resolution["policy_action"] == "skip_turn"
+        assert resolution["agent_id"] == "player_red"
+
+    async def test_plugin_game_actor_failure_can_forfeit_on_retry_exhaustion(self):
+        config = _make_connect_four_llm_moderated_config(max_turns=5)
+        config.game.moderation.failure_policy.actor_retry_exhaustion_action = "forfeit"  # type: ignore[union-attr]
+        bus = EventBus()
+        events = _setup_event_capture(bus)
+        deterministic_engine = SessionEngine(_make_connect_four_config(max_turns=5), EventBus())
+        runtime = deterministic_engine._game_runtime
+        assert runtime is not None
+        action = GameAction(action_type="drop_disc", payload={"column": 4})
+        runtime.parse_action_text = MagicMock(return_value=action)
+        runtime.moderation_backend = _SequenceModerationBackend(
+            [
+                ModerationDecision(
+                    accepted=False,
+                    moderator_mode="llm_moderated",
+                    next_state=runtime.state,
+                    reason="Illegal move.",
+                ),
+                ModerationDecision(
+                    accepted=False,
+                    moderator_mode="llm_moderated",
+                    next_state=runtime.state,
+                    reason="Illegal move.",
+                ),
+                ModerationDecision(
+                    accepted=False,
+                    moderator_mode="llm_moderated",
+                    next_state=runtime.state,
+                    reason="Illegal move.",
+                ),
+            ]
+        )
+
+        with patch("src.session.engine.GameRuntime.from_session_config", return_value=runtime):
+            with patch("src.session.engine.LiteLLMClient") as MockClient:
+                MockClient.return_value.complete = AsyncMock(return_value=_make_result("Column 4."))
+                with patch("src.session.engine.TranscriptWriter") as MockWriter:
+                    MockWriter.return_value.record = MagicMock()
+                    MockWriter.return_value.flush = AsyncMock()
+                    engine = SessionEngine(config, bus)
+                    final_state = await engine.run()
+
+        assert final_state.end_reason == "win_condition"
+        end_event = next(e for e in events if e.type == "SESSION_END")
+        assert end_event.reason == "win_condition"
+        authoritative = final_state.game_state.custom["authoritative_state"]
+        assert authoritative["winner"] == "player_black"
+        resolution = final_state.game_state.custom["moderation_resolutions"][-1]
+        assert resolution["policy_action"] == "forfeit"
+        assert resolution["winner"] == "player_black"
 
 
 # ---------------------------------------------------------------------------

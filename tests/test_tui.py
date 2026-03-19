@@ -15,13 +15,15 @@ Covers:
 from __future__ import annotations
 
 from datetime import datetime
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import DataTable, Input, Label, RichLog, Tab, Tabs
 
 from src.session.config import AgentConfig
+from src.games import GameAction, GameRuntime, ModerationDecision, ScriptedModerationBackend
+from src.providers import CompletionResult, TokenUsage
 from src.session.events import (
     ChannelCreatedEvent,
     MessageEvent,
@@ -102,6 +104,98 @@ def _make_session_end(reason: str = "max_turns") -> SessionEndEvent:
     )
 
 
+def _make_live_chat_config(*, monologue: bool = True, max_turns: int = 3):
+    from src.session.config import GameConfig, HITLConfig, OrchestratorConfig, SessionConfig, TranscriptConfig
+
+    return SessionConfig(
+        title="Live Chat Connect Four",
+        description="TUI game test",
+        type="games",
+        setting="game",
+        topic="Play Connect Four.",
+        agents=[
+            AgentConfig(
+                id="referee",
+                name="The Referee",
+                provider="anthropic",
+                model="claude-sonnet-4-6",
+                role="moderator",
+            ),
+            AgentConfig(
+                id="player_red",
+                name="Alex Mercer",
+                provider="openai",
+                model="gpt-4o",
+                role="player",
+                monologue=monologue,
+                monologue_mode="prompt",
+            ),
+            AgentConfig(
+                id="player_black",
+                name="Sasha Kim",
+                provider="google",
+                model="gemini-2.5-flash",
+                role="player",
+                monologue=monologue,
+                monologue_mode="prompt",
+            ),
+        ],
+        game=GameConfig(
+            plugin="connect_four",
+            name="Connect Four",
+            moderation={"mode": "llm_moderated", "moderator_agent_id": "referee"},
+        ),
+        orchestrator=OrchestratorConfig(type="python", module="turn_based"),
+        hitl=HITLConfig(enabled=False),
+        transcript=TranscriptConfig(auto_save=False, format="markdown", path="/tmp/"),
+        max_turns=max_turns,
+    )
+
+
+def _build_live_chat_runtime():
+    from src.session.config import GameConfig, SessionConfig
+
+    seed = SessionConfig(
+        title="Seed",
+        description="Seed",
+        type="games",
+        setting="game",
+        topic="Play Connect Four.",
+        agents=[
+            AgentConfig(id="referee", name="The Referee", provider="anthropic", model="m", role="moderator"),
+            AgentConfig(id="player_red", name="Alex Mercer", provider="openai", model="m", role="player"),
+            AgentConfig(id="player_black", name="Sasha Kim", provider="google", model="m", role="player"),
+        ],
+        game=GameConfig(plugin="connect_four", name="Connect Four"),
+    )
+    runtime = GameRuntime.from_session_config(seed)
+    action_red = GameAction(action_type="drop_disc", payload={"column": 4})
+    red_result = runtime.game.apply_action(runtime.state, "player_red", action_red)
+    action_black = GameAction(action_type="drop_disc", payload={"column": 5})
+    black_result = runtime.game.apply_action(red_result.next_state, "player_black", action_black)
+    runtime.moderation_backend = ScriptedModerationBackend(
+        decisions=[
+            ModerationDecision(
+                accepted=False,
+                moderator_mode="llm_moderated",
+                next_state=runtime.state,
+                reason="Move format unclear. State the column explicitly.",
+            ),
+            ModerationDecision.from_apply_result(
+                mode="llm_moderated",
+                action=action_red,
+                result=red_result,
+            ),
+            ModerationDecision.from_apply_result(
+                mode="llm_moderated",
+                action=action_black,
+                result=black_result,
+            ),
+        ]
+    )
+    return runtime
+
+
 # ---------------------------------------------------------------------------
 # Minimal test apps (one widget each, no external CSS)
 # ---------------------------------------------------------------------------
@@ -134,6 +228,22 @@ class HITLInputBarApp(App):
     CSS = ""
     def compose(self) -> ComposeResult:
         yield HITLInputBar(id="hib")
+
+
+class LiveChatTestApp(App):
+    CSS = ""
+
+    def __init__(self, screen, **kwargs):
+        super().__init__(**kwargs)
+        self._screen = screen
+        self.notifications: list[tuple[str, str | None]] = []
+
+    def on_mount(self) -> None:
+        self.push_screen(self._screen)
+
+    def notify(self, message, *, title=None, **kwargs):  # type: ignore[override]
+        self.notifications.append((str(message), title))
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -641,3 +751,49 @@ transcript:
                 await pilot.pause()
                 lv = app.screen.query_one(ListView)
                 assert len(list(lv.query("ListItem"))) == 1
+
+
+class TestLiveChatScreen:
+    async def test_live_chat_runs_moderated_game_and_renders_chat_system_and_monologue(self):
+        from src.tui.screens.live_chat import LiveChatScreen
+
+        runtime = _build_live_chat_runtime()
+        responses = [
+            CompletionResult(
+                text="<thinking>I should control the center.</thinking>Column 4.",
+                usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+                model="test-model",
+            ),
+            CompletionResult(
+                text="<thinking>Try the same move again clearly.</thinking>Column 4.",
+                usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+                model="test-model",
+            ),
+            CompletionResult(
+                text="<thinking>I can mirror the center pressure.</thinking>Column 5.",
+                usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+                model="test-model",
+            ),
+        ]
+
+        with patch("src.session.engine.GameRuntime.from_session_config", return_value=runtime):
+            with patch("src.session.engine.LiteLLMClient") as MockClient:
+                MockClient.return_value.complete = AsyncMock(side_effect=responses)
+                app = LiveChatTestApp(LiveChatScreen(_make_live_chat_config(max_turns=2)))
+                async with app.run_test(headless=True, size=(120, 40)) as pilot:
+                    await pilot.pause()
+                    await pilot.pause()
+                    await pilot.pause()
+                    await pilot.pause()
+                    await pilot.pause()
+
+                    screen = app.screen
+                    logs = screen.query("RichLog")
+                    line_count = sum(len(log.lines) for log in logs)
+                    mono_log = screen.query_one("#mono-log", RichLog)
+                    turn_label = screen.query_one("#turn-label", Label)
+
+                    assert line_count > 0
+                    assert len(mono_log.lines) > 0
+                    assert "ended" in str(turn_label.render()).lower()
+                    assert any("Session ended" in message for message, _ in app.notifications)

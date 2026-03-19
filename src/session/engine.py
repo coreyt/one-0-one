@@ -31,6 +31,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -38,11 +39,20 @@ from typing import TYPE_CHECKING
 import structlog
 
 from src.channels.router import ChannelRouter
+from src.games import (
+    GameRuntime,
+    HybridAuditRecord,
+    LLMModerationBackend,
+    ModerationDecision,
+)
+from src.games.moderation import moderate_turn_async
+from src.games.moderator_protocol import ModeratorTurnRequest, build_moderation_messages
+from src.games.registry import load_game_from_config
 from src.logging import get_logger
 from src.memory import load_memory, save_memory
 from src.orchestrators import OrchestratorInput, load_orchestrator
 from src.personas import assign_random_personalities
-from src.providers import ProviderError
+from src.providers import CommunicationSegment, ProviderError
 from src.providers.litellm_client import LiteLLMClient
 from src.response_parser import ResponseParser
 from src.session.config import SessionConfig
@@ -50,6 +60,7 @@ from src.session.event_bus import EventBus
 from src.session.events import (
     ChannelCreatedEvent,
     GameStateEvent,
+    HybridAuditEvent,
     IncidentEvent,
     MessageEvent,
     MonologueEvent,
@@ -90,14 +101,17 @@ class SessionEngine:
         self._provider = LiteLLMClient()
         self._orchestrate = load_orchestrator(config.orchestrator)
         self._transcript = TranscriptWriter(config)
+        self._game_runtime = (
+            self._build_game_runtime(config)
+            if config.game is not None and config.game.plugin
+            else None
+        )
         # Pause gate — cleared when paused, set when running
         self._resume_event = asyncio.Event()
         self._resume_event.set()
         self._state: SessionState | None = None
         # Track private channel IDs already announced via CHANNEL_CREATED events
         self._announced_channels: set[str] = set()
-        # Attach transcript writer to every event
-        self._bus.stream().subscribe(self._transcript.record)
 
     async def run(self) -> SessionState:
         """
@@ -122,6 +136,7 @@ class SessionEngine:
 
         # Emit channel creation events
         self._emit_channel_events(state)
+        self._emit_initial_game_state(state)
 
         # Load agent memory (no-ops until issue #1)
         for agent in self._config.agents:
@@ -134,8 +149,7 @@ class SessionEngine:
         except Exception as exc:
             log.exception("session.error", error=str(exc))
             end_event = self._make_end_event(state, "error")
-            self._bus.emit(end_event)
-            state.events.append(end_event)
+            self._emit_event(end_event, state)
         finally:
             # Save memory stubs (no-ops)
             for agent in self._config.agents:
@@ -154,13 +168,16 @@ class SessionEngine:
         agents = {
             a.id: AgentState(config=a) for a in self._config.agents
         }
-        return SessionState(
+        state = SessionState(
             session_id=self._session_id,
             turn_number=0,
             game_state=GameState(),
             events=[],
             agents=agents,
         )
+        if self._game_runtime is not None:
+            self._sync_authoritative_game_state(state)
+        return state
 
     def _emit_channel_events(self, state: SessionState) -> None:
         # Always emit the public channel
@@ -171,8 +188,7 @@ class SessionEngine:
             channel_type="public",
             members=[],
         )
-        self._bus.emit(public_event)
-        state.events.append(public_event)
+        self._emit_event(public_event, state)
         self._announced_channels.add("public")
 
         # Emit configured team/private channels
@@ -184,9 +200,21 @@ class SessionEngine:
                 channel_type=ch.type,
                 members=ch.members,
             )
-            self._bus.emit(event)
-            state.events.append(event)
+            self._emit_event(event, state)
             self._announced_channels.add(ch.id)
+
+    def _emit_initial_game_state(self, state: SessionState) -> None:
+        if self._game_runtime is None:
+            return
+        payload = self._game_runtime.state.model_dump()
+        event = GameStateEvent(
+            timestamp=datetime.now(UTC),
+            turn_number=state.turn_number,
+            session_id=self._session_id,
+            updates=payload,
+            full_state=state.game_state.model_dump(),
+        )
+        self._emit_event(event, state)
 
     # ------------------------------------------------------------------
     # Main loop
@@ -205,15 +233,53 @@ class SessionEngine:
             # Honour pause — waits here until resume() sets the event
             await self._resume_event.wait()
 
+            if state.end_reason is not None:
+                break
+
+            if self._game_runtime is not None and self._game_runtime.is_terminal():
+                end_event = self._make_end_event(state, "win_condition")
+                self._emit_event(end_event, state)
+                state.end_reason = end_event.reason
+                log.info(
+                    "session.ended",
+                    reason=end_event.reason,
+                    turns=state.turn_number,
+                    source="authoritative_game_runtime",
+                )
+                break
+
+            if (
+                self._config.max_turns is not None
+                and state.turn_number >= self._config.max_turns
+            ):
+                end_event = self._make_end_event(state, "max_turns")
+                self._emit_event(end_event, state)
+                state.end_reason = end_event.reason
+                log.info(
+                    "session.ended",
+                    reason=end_event.reason,
+                    turns=state.turn_number,
+                    source="engine_max_turns_cap",
+                )
+                break
+
             orch_input = OrchestratorInput(config=self._config, state=state)
             orch_output = self._orchestrate(orch_input)
+
+            if self._game_runtime is not None:
+                turn_context = self._game_runtime.turn_context()
+                if turn_context.active_actor_ids:
+                    orch_output.next_agents = turn_context.active_actor_ids
+                    orch_output.advance_turns = len(turn_context.active_actor_ids)
+                if orch_output.session_end and orch_output.end_reason != "max_turns":
+                    orch_output.session_end = False
+                    orch_output.end_reason = None
 
             if orch_output.session_end:
                 end_event = self._make_end_event(
                     state, orch_output.end_reason or "max_turns"
                 )
-                self._bus.emit(end_event)
-                state.events.append(end_event)
+                self._emit_event(end_event, state)
                 state.end_reason = end_event.reason
                 log.info(
                     "session.ended",
@@ -235,8 +301,7 @@ class SessionEngine:
                         updates=orch_output.game_state_updates,
                         full_state=state.game_state.model_dump(),
                     )
-                    self._bus.emit(gs_event)
-                    state.events.append(gs_event)
+                    self._emit_event(gs_event, state)
                 log.info(
                     "session.waiting_for_hitl",
                     turn=state.turn_number,
@@ -254,8 +319,7 @@ class SessionEngine:
                     rule=violation.rule,
                     violation_text=violation.violation_text,
                 )
-                self._bus.emit(rv_event)
-                state.events.append(rv_event)
+                self._emit_event(rv_event, state)
 
             # Apply game state updates and emit GameStateEvent
             if orch_output.game_state_updates:
@@ -268,8 +332,7 @@ class SessionEngine:
                     updates=orch_output.game_state_updates,
                     full_state=state.game_state.model_dump(),
                 )
-                self._bus.emit(gs_event)
-                state.events.append(gs_event)
+                self._emit_event(gs_event, state)
 
             # Emit TURN event
             is_parallel = len(orch_output.next_agents) > 1
@@ -280,8 +343,7 @@ class SessionEngine:
                 agent_ids=orch_output.next_agents,
                 is_parallel=is_parallel,
             )
-            self._bus.emit(turn_event)
-            state.events.append(turn_event)
+            self._emit_event(turn_event, state)
 
             log.info(
                 "turn.started",
@@ -311,10 +373,14 @@ class SessionEngine:
             # Safety valve: if the same turn has failed _MAX_EMPTY_ATTEMPTS times in a
             # row (all providers down), force advancement to avoid an infinite loop.
             new_events = state.events[events_before:]
+            retry_pending = bool(state.game_state.custom.pop("_retry_turn_pending", False))
             produced_output = any(
                 e.type in ("MESSAGE", "MONOLOGUE") for e in new_events
             )
-            if produced_output:
+            if retry_pending:
+                _empty_attempts.pop(state.turn_number, None)
+                advance = 0
+            elif produced_output:
                 _empty_attempts.pop(state.turn_number, None)
                 advance = orch_output.advance_turns
             else:
@@ -332,9 +398,10 @@ class SessionEngine:
                     advance = 0
             state.turn_number += advance
             # Increment round counter after each full rotation through all agents
-            agent_count = len(self._config.agents)
-            if agent_count > 0 and state.turn_number % agent_count == 0:
-                state.game_state.round += 1
+            if self._game_runtime is None:
+                agent_count = len(self._config.agents)
+                if agent_count > 0 and state.turn_number % agent_count == 0:
+                    state.game_state.round += 1
             log.info("turn.completed", turn=state.turn_number - advance)
 
         return state
@@ -401,8 +468,7 @@ class SessionEngine:
                 incident_type=incident_type,
                 detail=str(exc),
             )
-            self._bus.emit(incident_event)
-            state.events.append(incident_event)
+            self._emit_event(incident_event, state)
             agent_state.status = "idle"
             return
 
@@ -416,8 +482,18 @@ class SessionEngine:
             agent_state.token_usage.get("completion_tokens", 0) + result.usage.completion_tokens
         )
 
-        # Parse XML tags (strip leading "AgentName: " prefix if model echoes it)
+        # Parse XML tags for legacy/prompt-fallback sessions.
         parsed = self._parser.parse(result.text, agent_name=agent_config.name)
+        communication_segments = (
+            result.communication
+            if result.communication
+            else self._parser.build_communication_segments(parsed)
+        )
+        monologue_segments = (
+            result.monologue
+            if result.monologue
+            else self._parser.build_monologue_segments(parsed)
+        )
 
         # Handle elimination signals from any agent (typically the Narrator)
         newly_eliminated: list[str] = []
@@ -445,113 +521,47 @@ class SessionEngine:
                 updates={"newly_eliminated": eid},
                 full_state=state.game_state.model_dump(),
             )
-            self._bus.emit(elim_event)
-            state.events.append(elim_event)
+            self._emit_event(elim_event, state)
 
-        # Emit MONOLOGUE event (observer-only — never added to other agents' context)
-        if parsed.thinking:
+        # Emit MONOLOGUE events (observer-only — never added to other agents' context)
+        for segment in monologue_segments:
             mono_event = MonologueEvent(
                 timestamp=now,
                 turn_number=state.turn_number,
                 session_id=self._session_id,
                 agent_id=agent_id,
                 agent_name=agent_config.name,
-                text=parsed.thinking,
+                text=segment.text,
             )
-            self._bus.emit(mono_event)
-            state.events.append(mono_event)
+            self._emit_event(mono_event, state)
             log.debug(
                 "agent.monologue",
                 agent=agent_config.name,
-                text=parsed.thinking[:120],
+                source=segment.source,
+                text=segment.text[:120],
                 turn=state.turn_number,
             )
 
-        # Emit team message
-        if parsed.team_message and agent_config.team:
-            team_event = MessageEvent(
-                timestamp=now,
-                turn_number=state.turn_number,
-                session_id=self._session_id,
+        for segment in communication_segments:
+            self._emit_communication_segment(
+                segment=segment,
                 agent_id=agent_id,
                 agent_name=agent_config.name,
                 model=result.model,
-                channel_id=agent_config.team,
-                text=parsed.team_message,
+                turn_number=state.turn_number,
                 is_parallel=is_parallel,
-            )
-            self._bus.emit(team_event)
-            state.events.append(team_event)
-            log.info(
-                "agent.team_message",
-                agent=agent_config.name,
-                channel=agent_config.team,
-                text=parsed.team_message[:120],
-                turn=state.turn_number,
+                timestamp=now,
+                state=state,
+                team_channel_id=agent_config.team,
             )
 
-        # Emit private message
-        if parsed.private_to and parsed.private_message:
-            # Resolve recipient name → agent_id
-            recipient_id = next(
-                (a.id for a in self._config.agents if a.name == parsed.private_to),
-                parsed.private_to,  # fallback: use the name as-is
-            )
-            private_channel_id = f"private_{agent_id}_{recipient_id}"
-            # Announce the channel the first time it is used
-            if private_channel_id not in self._announced_channels:
-                ch_event = ChannelCreatedEvent(
-                    timestamp=now,
-                    session_id=self._session_id,
-                    channel_id=private_channel_id,
-                    channel_type="private",
-                    members=[agent_id, recipient_id],
-                )
-                self._bus.emit(ch_event)
-                state.events.append(ch_event)
-                self._announced_channels.add(private_channel_id)
-            priv_event = MessageEvent(
-                timestamp=now,
-                turn_number=state.turn_number,
-                session_id=self._session_id,
+        if self._game_runtime is not None:
+            await self._apply_authoritative_game_action(
                 agent_id=agent_id,
                 agent_name=agent_config.name,
-                model=result.model,
-                channel_id=private_channel_id,
-                recipient_id=recipient_id,
-                text=parsed.private_message,
-                is_parallel=is_parallel,
-            )
-            self._bus.emit(priv_event)
-            state.events.append(priv_event)
-            log.info(
-                "agent.private_message",
-                agent=agent_config.name,
-                to=parsed.private_to,
-                text=parsed.private_message[:120],
-                turn=state.turn_number,
-            )
-
-        # Emit public message (always, even if empty after tag extraction)
-        if parsed.public_message:
-            pub_event = MessageEvent(
+                state=state,
+                parsed_public_message=parsed.public_message,
                 timestamp=now,
-                turn_number=state.turn_number,
-                session_id=self._session_id,
-                agent_id=agent_id,
-                agent_name=agent_config.name,
-                model=result.model,
-                channel_id="public",
-                text=parsed.public_message,
-                is_parallel=is_parallel,
-            )
-            self._bus.emit(pub_event)
-            state.events.append(pub_event)
-            log.info(
-                "agent.public_message",
-                agent=agent_config.name,
-                text=parsed.public_message[:120],
-                turn=state.turn_number,
             )
 
         agent_state.status = "idle"
@@ -595,8 +605,7 @@ class SessionEngine:
             text=text,
             is_parallel=False,
         )
-        self._bus.emit(event)
-        self._state.events.append(event)
+        self._emit_event(event, self._state)
         log.info(
             "session.hitl_message",
             session_id=self._session_id,
@@ -623,3 +632,590 @@ class SessionEngine:
             session_id=self._session_id,
             reason=safe_reason,  # type: ignore[arg-type]
         )
+
+    def _build_game_runtime(self, config: SessionConfig) -> GameRuntime:
+        llm_backend = None
+        if (
+            config.game is not None
+            and config.game.moderation.mode in {"llm_moderated", "hybrid_audit"}
+        ):
+            llm_backend = self._build_provider_backed_llm_backend(config)
+        return GameRuntime.from_session_config(config, llm_backend=llm_backend)
+
+    def _build_provider_backed_llm_backend(
+        self,
+        config: SessionConfig,
+    ) -> LLMModerationBackend:
+        if config.game is None:
+            raise ValueError("Session config does not define a game.")
+        moderator_id = config.game.moderation.moderator_agent_id
+        moderator_agent = next(
+            (agent for agent in config.agents if agent.id == moderator_id),
+            None,
+        )
+        if moderator_agent is None:
+            raise ValueError(
+                f"Moderator agent {moderator_id!r} is not defined in session agents."
+            )
+
+        game = load_game_from_config(config.game)
+        state = game.initial_state(config.game, config.agents)
+        llm_defaults = config.llm_defaults
+
+        async def moderator_callable(*, actor_id, proposed_action, state, game):
+            request = ModeratorTurnRequest(
+                game_type=game.game_type,
+                actor_id=actor_id,
+                proposed_action=proposed_action,
+                state=state,
+                visible_state=game.visible_state(state, actor_id),
+                legal_actions=game.legal_actions(state, actor_id),
+            )
+            messages = build_moderation_messages(request)
+            kwargs = {
+                "model": f"{moderator_agent.provider}/{moderator_agent.model}",
+                "messages": messages,
+                "temperature": 0.0,
+                "native_thinking": False,
+                "thinking_budget_tokens": llm_defaults.thinking_budget,
+                "timeout": llm_defaults.timeout,
+            }
+            if llm_defaults.max_tokens:
+                kwargs["max_tokens"] = llm_defaults.max_tokens
+            return await self._provider.complete(**kwargs)
+
+        return LLMModerationBackend(
+            game=game,
+            state=state,
+            moderator_callable=moderator_callable,
+        )
+
+    def _sync_authoritative_game_state(self, state: SessionState) -> None:
+        if self._game_runtime is None:
+            return
+        authoritative = self._game_runtime.state.model_dump()
+        visible_states = {
+            agent.id: self._game_runtime.visible_state(agent.id).model_dump()
+            for agent in self._config.agents
+        }
+        legal_actions = {
+            agent.id: [spec.model_dump() for spec in self._game_runtime.legal_actions(agent.id)]
+            for agent in self._config.agents
+        }
+        state.game_state.custom["authoritative_state"] = authoritative
+        state.game_state.custom["game_type"] = self._game_runtime.game.game_type
+        state.game_state.custom["visible_states"] = visible_states
+        state.game_state.custom["legal_actions"] = legal_actions
+        state.game_state.round = authoritative.get("round_number", state.game_state.round)
+        state.game_state.winner = authoritative.get("winner")
+        state.game_state.is_over = self._game_runtime.is_terminal()
+
+    async def _apply_authoritative_game_action(
+        self,
+        *,
+        agent_id: str,
+        agent_name: str,
+        state: SessionState,
+        parsed_public_message: str,
+        timestamp: datetime,
+    ) -> None:
+        if self._game_runtime is None:
+            return
+        action = self._game_runtime.parse_action_text(parsed_public_message)
+        if action is None:
+            self._handle_moderation_failure(
+                agent_id=agent_id,
+                agent_name=agent_name,
+                state=state,
+                timestamp=timestamp,
+                violation_text=parsed_public_message,
+                reason="Could not parse a legal game action from the player's public move.",
+                proposed_action={"raw_text": parsed_public_message},
+                failure_category="actor",
+            )
+            return
+
+        try:
+            moderation_result = await moderate_turn_async(
+                self._game_runtime.moderation_backend,
+                actor_id=agent_id,
+                proposed_action=action,
+            )
+            decision = self._resolve_moderation_decision(
+                moderation_result,
+                actor_id=agent_id,
+                proposed_action=action,
+                timestamp=timestamp,
+                state=state,
+            )
+        except (ProviderError, ValueError) as exc:
+            self._handle_moderation_failure(
+                agent_id=agent_id,
+                agent_name=agent_name,
+                state=state,
+                timestamp=timestamp,
+                violation_text=parsed_public_message,
+                reason=str(exc),
+                proposed_action=action.model_dump(),
+                failure_category="moderator",
+            )
+            return
+        if not decision.accepted or decision.next_state is None:
+            self._handle_moderation_failure(
+                agent_id=agent_id,
+                agent_name=agent_name,
+                state=state,
+                timestamp=timestamp,
+                violation_text=parsed_public_message,
+                reason=decision.reason or "Invalid game action.",
+                proposed_action=action.model_dump(),
+                failure_category="actor",
+            )
+            return
+
+        self._game_runtime.state = decision.next_state
+        self._reset_moderation_retry_count(state, agent_id)
+        self._sync_authoritative_game_state(state)
+        gs_event = GameStateEvent(
+            timestamp=timestamp,
+            turn_number=state.turn_number,
+            session_id=self._session_id,
+            updates={
+                "authoritative_delta": decision.state_delta,
+                "authoritative_state": self._game_runtime.state.model_dump(),
+            },
+            full_state=state.game_state.model_dump(),
+        )
+        self._emit_event(gs_event, state)
+        log.info(
+            "game.action_applied",
+            agent=agent_name,
+            action_type=(
+                decision.applied_action.action_type
+                if decision.applied_action is not None
+                else action.action_type
+            ),
+            delta=json.dumps(decision.state_delta),
+            turn=state.turn_number,
+        )
+
+    def _resolve_moderation_decision(
+        self,
+        moderation_result: ModerationDecision | HybridAuditRecord,
+        *,
+        actor_id: str,
+        proposed_action: object,
+        timestamp: datetime,
+        state: SessionState,
+    ) -> ModerationDecision:
+        if isinstance(moderation_result, HybridAuditRecord):
+            audits = state.game_state.custom.setdefault("hybrid_audit_records", [])
+            audit_record = {
+                "turn_number": state.turn_number,
+                "actor_id": actor_id,
+                "proposed_action": (
+                    proposed_action.model_dump()
+                    if hasattr(proposed_action, "model_dump")
+                    else proposed_action
+                ),
+                "diverged": moderation_result.diverged,
+                "primary_decision": moderation_result.primary.model_dump(),
+                "shadow_decision": (
+                    moderation_result.shadow.model_dump()
+                    if moderation_result.shadow is not None
+                    else None
+                ),
+            }
+            audits.append(audit_record)
+            audit_event = HybridAuditEvent(
+                timestamp=timestamp,
+                turn_number=state.turn_number,
+                session_id=self._session_id,
+                actor_id=actor_id,
+                proposed_action=audit_record["proposed_action"],
+                diverged=moderation_result.diverged,
+                primary_decision=audit_record["primary_decision"],
+                shadow_decision=audit_record["shadow_decision"],
+            )
+            self._emit_event(audit_event, state)
+            return moderation_result.primary
+        return moderation_result
+
+    def _handle_moderation_failure(
+        self,
+        *,
+        agent_id: str,
+        agent_name: str,
+        state: SessionState,
+        timestamp: datetime,
+        violation_text: str,
+        reason: str,
+        proposed_action: dict,
+        failure_category: str,
+    ) -> None:
+        rv_event = RuleViolationEvent(
+            timestamp=timestamp,
+            turn_number=state.turn_number,
+            session_id=self._session_id,
+            agent_id=agent_id,
+            rule=reason,
+            violation_text=violation_text,
+        )
+        self._emit_event(rv_event, state)
+        failures = state.game_state.custom.setdefault("moderation_failures", [])
+        failures.append(
+            {
+                "turn_number": state.turn_number,
+                "agent_id": agent_id,
+                "failure_category": failure_category,
+                "reason": reason,
+                "proposed_action": proposed_action,
+            }
+        )
+        retries = self._increment_moderation_retry_count(state, agent_id)
+        retry_limit = self._failure_retry_limit(failure_category)
+        if retries > retry_limit:
+            self._resolve_failure_exhaustion(
+                agent_id=agent_id,
+                agent_name=agent_name,
+                state=state,
+                timestamp=timestamp,
+                reason=reason,
+                failure_category=failure_category,
+            )
+            log.warning(
+                "game.moderation_retry_exhausted",
+                agent=agent_name,
+                retries=retries,
+                failure_category=failure_category,
+                turn=state.turn_number,
+            )
+            return
+        state.game_state.custom["_retry_turn_pending"] = True
+        log.info(
+            "game.action_rejected",
+            agent=agent_name,
+            reason=reason,
+            retry_count=retries,
+            failure_category=failure_category,
+            turn=state.turn_number,
+        )
+
+    def _failure_retry_limit(self, failure_category: str) -> int:
+        if self._config.game is None:
+            return _MAX_VIOLATION_RETRIES
+        policy = self._config.game.moderation.failure_policy
+        if failure_category == "moderator":
+            return policy.moderator_retry_limit
+        return policy.actor_retry_limit
+
+    def _resolve_failure_exhaustion(
+        self,
+        *,
+        agent_id: str,
+        agent_name: str,
+        state: SessionState,
+        timestamp: datetime,
+        reason: str,
+        failure_category: str,
+    ) -> None:
+        action = self._failure_exhaustion_action(failure_category)
+        state.game_state.custom["_retry_turn_pending"] = False
+        self._reset_moderation_retry_count(state, agent_id)
+
+        if action == "skip_turn":
+            self._apply_skip_turn_resolution(
+                agent_id=agent_id,
+                agent_name=agent_name,
+                state=state,
+                timestamp=timestamp,
+                reason=reason,
+                failure_category=failure_category,
+            )
+            return
+        if action == "forfeit":
+            self._apply_forfeit_resolution(
+                agent_id=agent_id,
+                agent_name=agent_name,
+                state=state,
+                timestamp=timestamp,
+                reason=reason,
+                failure_category=failure_category,
+            )
+            return
+
+        resolution = self._record_moderation_resolution(
+            state=state,
+            timestamp=timestamp,
+            updates={
+                "policy_action": "session_error",
+                "agent_id": agent_id,
+                "failure_category": failure_category,
+                "reason": reason,
+            },
+        )
+        end_event = self._make_end_event(state, "error")
+        end_event.message = (
+            f"Moderation failed for {agent_name}; exhaustion policy session_error applied."
+        )
+        self._emit_event(end_event, state)
+        state.end_reason = end_event.reason
+        resolution["end_reason"] = end_event.reason
+
+    def _failure_exhaustion_action(self, failure_category: str) -> str:
+        if self._config.game is None:
+            return "session_error"
+        policy = self._config.game.moderation.failure_policy
+        if failure_category == "moderator":
+            return policy.moderator_retry_exhaustion_action
+        return policy.actor_retry_exhaustion_action
+
+    def _apply_skip_turn_resolution(
+        self,
+        *,
+        agent_id: str,
+        agent_name: str,
+        state: SessionState,
+        timestamp: datetime,
+        reason: str,
+        failure_category: str,
+    ) -> None:
+        if self._game_runtime is not None:
+            self._game_runtime.state = self._advance_runtime_turn_without_action(
+                self._game_runtime.state,
+                actor_id=agent_id,
+            )
+            self._sync_authoritative_game_state(state)
+        self._record_moderation_resolution(
+            state=state,
+            timestamp=timestamp,
+            updates={
+                "policy_action": "skip_turn",
+                "agent_id": agent_id,
+                "agent_name": agent_name,
+                "failure_category": failure_category,
+                "reason": reason,
+            },
+        )
+
+    def _apply_forfeit_resolution(
+        self,
+        *,
+        agent_id: str,
+        agent_name: str,
+        state: SessionState,
+        timestamp: datetime,
+        reason: str,
+        failure_category: str,
+    ) -> None:
+        winner = self._resolve_forfeit_winner(agent_id)
+        if self._game_runtime is not None:
+            self._game_runtime.state = self._mark_runtime_forfeit(
+                self._game_runtime.state,
+                winner=winner,
+            )
+            self._sync_authoritative_game_state(state)
+        state.game_state.winner = winner
+        state.game_state.is_over = True
+        resolution = self._record_moderation_resolution(
+            state=state,
+            timestamp=timestamp,
+            updates={
+                "policy_action": "forfeit",
+                "agent_id": agent_id,
+                "agent_name": agent_name,
+                "failure_category": failure_category,
+                "reason": reason,
+                "winner": winner,
+            },
+        )
+        end_event = self._make_end_event(state, "win_condition")
+        end_event.message = f"{agent_name} forfeited after repeated moderated failures."
+        self._emit_event(end_event, state)
+        state.end_reason = end_event.reason
+        resolution["end_reason"] = end_event.reason
+
+    def _record_moderation_resolution(
+        self,
+        *,
+        state: SessionState,
+        timestamp: datetime,
+        updates: dict,
+    ) -> dict:
+        resolutions = state.game_state.custom.setdefault("moderation_resolutions", [])
+        resolution = {"turn_number": state.turn_number, **updates}
+        resolutions.append(resolution)
+        gs_event = GameStateEvent(
+            timestamp=timestamp,
+            turn_number=state.turn_number,
+            session_id=self._session_id,
+            updates={"moderation_resolution": resolution},
+            full_state=state.game_state.model_dump(),
+        )
+        self._emit_event(gs_event, state)
+        return resolution
+
+    def _advance_runtime_turn_without_action(self, runtime_state, *, actor_id: str):
+        players = list(getattr(runtime_state, "players", []))
+        if not players or actor_id not in players:
+            return runtime_state
+        next_index = (players.index(actor_id) + 1) % len(players)
+        updates = {
+            "active_player": players[next_index],
+            "turn_index": getattr(runtime_state, "turn_index", 0) + 1,
+        }
+        if hasattr(runtime_state, "round_number"):
+            updates["round_number"] = getattr(runtime_state, "round_number", 0) + 1
+        return runtime_state.model_copy(update=updates)
+
+    def _mark_runtime_forfeit(self, runtime_state, *, winner: str):
+        updates = {
+            "winner": winner,
+            "active_player": "",
+            "phase": "complete",
+        }
+        if hasattr(runtime_state, "is_draw"):
+            updates["is_draw"] = False
+        return runtime_state.model_copy(update=updates)
+
+    def _resolve_forfeit_winner(self, forfeiting_agent_id: str) -> str:
+        if self._game_runtime is not None:
+            players = list(getattr(self._game_runtime.state, "players", []))
+            for player_id in players:
+                if player_id != forfeiting_agent_id:
+                    return player_id
+        for agent in self._config.agents:
+            if agent.id != forfeiting_agent_id and agent.role != "moderator":
+                return agent.id
+        return ""
+
+    @staticmethod
+    def _increment_moderation_retry_count(state: SessionState, agent_id: str) -> int:
+        retry_counts = state.game_state.custom.setdefault("moderation_retry_counts", {})
+        current = int(retry_counts.get(agent_id, 0)) + 1
+        retry_counts[agent_id] = current
+        return current
+
+    @staticmethod
+    def _reset_moderation_retry_count(state: SessionState, agent_id: str) -> None:
+        retry_counts = state.game_state.custom.setdefault("moderation_retry_counts", {})
+        if agent_id in retry_counts:
+            retry_counts[agent_id] = 0
+
+    def _emit_communication_segment(
+        self,
+        *,
+        segment: CommunicationSegment,
+        agent_id: str,
+        agent_name: str,
+        model: str,
+        turn_number: int,
+        is_parallel: bool,
+        timestamp: datetime,
+        state: SessionState,
+        team_channel_id: str | None,
+    ) -> None:
+        text = segment.text.strip()
+        if not text:
+            return
+
+        if segment.visibility == "team":
+            if not team_channel_id:
+                log.warning(
+                    "agent.team_message_dropped",
+                    agent=agent_name,
+                    reason="no team assigned",
+                    turn=turn_number,
+                )
+                return
+            event = MessageEvent(
+                timestamp=timestamp,
+                turn_number=turn_number,
+                session_id=self._session_id,
+                agent_id=agent_id,
+                agent_name=agent_name,
+                model=model,
+                channel_id=team_channel_id,
+                text=text,
+                is_parallel=is_parallel,
+            )
+            self._emit_event(event, state)
+            log.info(
+                "agent.team_message",
+                agent=agent_name,
+                channel=team_channel_id,
+                text=text[:120],
+                turn=turn_number,
+            )
+            return
+
+        if segment.visibility == "private":
+            if not segment.recipient:
+                log.warning(
+                    "agent.private_message_dropped",
+                    agent=agent_name,
+                    reason="missing recipient",
+                    turn=turn_number,
+                )
+                return
+            recipient_id = next(
+                (a.id for a in self._config.agents if a.name == segment.recipient),
+                segment.recipient,
+            )
+            private_channel_id = f"private_{agent_id}_{recipient_id}"
+            if private_channel_id not in self._announced_channels:
+                ch_event = ChannelCreatedEvent(
+                    timestamp=timestamp,
+                    session_id=self._session_id,
+                    channel_id=private_channel_id,
+                    channel_type="private",
+                    members=[agent_id, recipient_id],
+                )
+                self._emit_event(ch_event, state)
+                self._announced_channels.add(private_channel_id)
+            event = MessageEvent(
+                timestamp=timestamp,
+                turn_number=turn_number,
+                session_id=self._session_id,
+                agent_id=agent_id,
+                agent_name=agent_name,
+                model=model,
+                channel_id=private_channel_id,
+                recipient_id=recipient_id,
+                text=text,
+                is_parallel=is_parallel,
+            )
+            self._emit_event(event, state)
+            log.info(
+                "agent.private_message",
+                agent=agent_name,
+                to=segment.recipient,
+                text=text[:120],
+                turn=turn_number,
+            )
+            return
+
+        event = MessageEvent(
+            timestamp=timestamp,
+            turn_number=turn_number,
+            session_id=self._session_id,
+            agent_id=agent_id,
+            agent_name=agent_name,
+            model=model,
+            channel_id="public",
+            text=text,
+            is_parallel=is_parallel,
+        )
+        self._emit_event(event, state)
+        log.info(
+            "agent.public_message",
+            agent=agent_name,
+            text=text[:120],
+            turn=turn_number,
+        )
+
+    def _emit_event(self, event, state: SessionState | None = None) -> None:
+        self._transcript.record(event)
+        self._bus.emit(event)
+        if state is not None:
+            state.events.append(event)

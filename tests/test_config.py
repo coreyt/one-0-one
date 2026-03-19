@@ -119,6 +119,63 @@ class TestCrossFieldValidation:
         config = SessionConfig.model_validate(cfg)
         assert config.completion_signal == "The README is complete"
 
+    def test_game_moderation_config_parses(self):
+        cfg = self._base_config(
+            type="games",
+            game={
+                "plugin": "connect_four",
+                "name": "Connect Four",
+                "moderation": {
+                    "mode": "hybrid_audit",
+                    "moderator_agent_id": "judge",
+                    "shadow_mode": "deterministic",
+                    "failure_policy": {
+                        "actor_retry_limit": 3,
+                        "actor_retry_exhaustion_action": "skip_turn",
+                        "moderator_retry_limit": 2,
+                        "moderator_retry_exhaustion_action": "session_error",
+                    },
+                },
+            },
+            agents=[
+                self._minimal_agent("a1"),
+                {**self._minimal_agent("judge"), "role": "moderator"},
+            ],
+        )
+        config = SessionConfig.model_validate(cfg)
+        assert config.game is not None
+        assert config.game.moderation.mode == "hybrid_audit"
+        assert config.game.moderation.moderator_agent_id == "judge"
+        assert config.game.moderation.failure_policy.actor_retry_exhaustion_action == "skip_turn"
+
+    def test_game_moderation_failure_policy_defaults(self):
+        cfg = self._base_config(
+            type="games",
+            game={"plugin": "connect_four", "name": "Connect Four"},
+        )
+        config = SessionConfig.model_validate(cfg)
+        assert config.game is not None
+        assert config.game.moderation.failure_policy.actor_retry_limit == 2
+        assert config.game.moderation.failure_policy.actor_retry_exhaustion_action == "forfeit"
+        assert config.game.moderation.failure_policy.moderator_retry_limit == 2
+        assert (
+            config.game.moderation.failure_policy.moderator_retry_exhaustion_action
+            == "session_error"
+        )
+
+    def test_llm_moderated_mode_requires_moderator_agent_id(self):
+        cfg = self._base_config(
+            type="games",
+            game={
+                "plugin": "connect_four",
+                "name": "Connect Four",
+                "moderation": {"mode": "llm_moderated"},
+            },
+            agents=[self._minimal_agent("a1"), self._minimal_agent("a2")],
+        )
+        with pytest.raises(ValidationError, match="moderator_agent_id"):
+            SessionConfig.model_validate(cfg)
+
 
 class TestAgentConfig:
     def test_defaults(self):

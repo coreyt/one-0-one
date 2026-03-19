@@ -171,6 +171,13 @@ class TranscriptWriter:
                     f"**[Game state — Turn {event.turn_number}]** "
                     f"`{json.dumps(event.updates)}`"
                 )
+            case "HYBRID_AUDIT":
+                return (
+                    f"**[Hybrid audit — Turn {event.turn_number}]** "
+                    f"actor={event.actor_id} "
+                    f"diverged={event.diverged} "
+                    f"proposed_action=`{json.dumps(event.proposed_action)}`"
+                )
             case "RULE_VIOLATION":
                 return (
                     f"**[Rule violation — Turn {event.turn_number}]** "

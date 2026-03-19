@@ -8,6 +8,7 @@ from pydantic import TypeAdapter
 from src.session.events import (
     ChannelCreatedEvent,
     GameStateEvent,
+    HybridAuditEvent,
     MessageEvent,
     MonologueEvent,
     RuleViolationEvent,
@@ -135,6 +136,36 @@ class TestGameStateEvent:
         assert restored.type == "GAME_STATE"
 
 
+class TestHybridAuditEvent:
+    def test_hybrid_audit(self):
+        e = HybridAuditEvent(
+            timestamp=NOW,
+            turn_number=4,
+            session_id="s1",
+            actor_id="player_red",
+            proposed_action={"action_type": "drop_disc", "payload": {"column": 4}},
+            diverged=True,
+            primary_decision={"accepted": True},
+            shadow_decision={"accepted": False},
+        )
+        assert e.type == "HYBRID_AUDIT"
+        assert e.diverged is True
+
+    def test_round_trip(self):
+        e = HybridAuditEvent(
+            timestamp=NOW,
+            turn_number=4,
+            session_id="s1",
+            actor_id="player_red",
+            proposed_action={"action_type": "drop_disc", "payload": {"column": 4}},
+            diverged=False,
+            primary_decision={"accepted": True},
+            shadow_decision=None,
+        )
+        restored = _round_trip(e)
+        assert restored.type == "HYBRID_AUDIT"
+
+
 class TestRuleViolationEvent:
     def test_rule_violation(self):
         e = RuleViolationEvent(
@@ -206,10 +237,13 @@ class TestDiscriminatedUnion:
              "session_id": "s", "agent_id": "a", "agent_name": "N", "text": "t"},
             {"type": "TURN", "timestamp": NOW.isoformat(), "turn_number": 1,
              "session_id": "s", "agent_ids": ["a"]},
+            {"type": "HYBRID_AUDIT", "timestamp": NOW.isoformat(), "turn_number": 1,
+             "session_id": "s", "actor_id": "a", "proposed_action": {"action_type": "move"},
+             "diverged": False, "primary_decision": {"accepted": True}, "shadow_decision": None},
             {"type": "SESSION_END", "timestamp": NOW.isoformat(), "turn_number": 1,
              "session_id": "s", "reason": "max_turns"},
         ]
-        expected = ["MESSAGE", "MONOLOGUE", "TURN", "SESSION_END"]
+        expected = ["MESSAGE", "MONOLOGUE", "TURN", "HYBRID_AUDIT", "SESSION_END"]
         for payload, exp in zip(payloads, expected):
             event = TA.validate_python(payload)
             assert event.type == exp

@@ -8,7 +8,15 @@ max_turns: 120
 completion_signal: "WINS CONNECT FOUR!"
 
 game:
+  plugin: connect_four
   name: "Connect Four"
+  moderation:
+    mode: deterministic
+    failure_policy:
+      actor_retry_limit: 2
+      actor_retry_exhaustion_action: forfeit
+      moderator_retry_limit: 2
+      moderator_retry_exhaustion_action: session_error
   rules:
     - "The board is 7 columns wide and 6 rows tall."
     - "Players alternate dropping one disc per turn into any column that is not full."
