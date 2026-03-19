@@ -7,7 +7,7 @@ from pathlib import Path
 from textual.app import ComposeResult
 from textual.containers import Horizontal
 from textual.screen import Screen
-from textual.widgets import Footer, Header, Label, ListItem, ListView, Tab, Tabs
+from textual.widgets import Footer, Header, Label, ListItem, ListView, Static, Tab, Tabs
 
 from src.session.config import SessionConfig, load_session_config
 from src.settings import settings
@@ -34,11 +34,12 @@ class TemplateItem(ListItem):
     def compose(self) -> ComposeResult:
         setting = self.config.setting or "general"
         yield Label(
-            f"[bold]{self.config.title}[/bold]  [dim]\\[{setting}][/dim]"
+            f"[bold]> {self.config.title}[/bold]  [dim]\\[{setting}][/dim]",
+            classes="template-row-title",
         )
         desc = (self.config.description or "")[:80]
         if desc:
-            yield Label(f"  [dim]{desc}[/dim]")
+            yield Label(f"  [dim]{desc}[/dim]", classes="template-row-description")
 
 
 class SessionBrowserScreen(Screen):
@@ -47,7 +48,7 @@ class SessionBrowserScreen(Screen):
     CSS_PATH = ["../styles/browser.tcss"]
 
     BINDINGS = [
-        ("enter", "launch", "Launch"),
+        ("enter", "new_session", "New"),
         ("n", "new_session", "New"),
         ("h", "open_history", "History"),
         ("q", "quit_app", "Quit"),
@@ -60,16 +61,26 @@ class SessionBrowserScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
-        with Tabs(id="type-filter"):
-            for f in _TYPE_FILTERS:
-                yield Tab(f, id=f"filter_{f.lower().replace('-', '_')}")
+        yield Tabs(
+            *(Tab(f, id=f"filter_{f.lower().replace('-', '_')}") for f in _TYPE_FILTERS),
+            id="type-filter",
+            active="filter_all",
+        )
+        yield Static(
+            "Templates: use ↑/↓ to select, Enter or n to open a new run from the selected template.",
+            id="browser-instructions",
+        )
         with Horizontal(id="browser-split"):
-            yield ListView(id="template-list")
+            with Static(id="template-list-pane"):
+                yield Label("Templates", id="template-list-title")
+                yield ListView(id="template-list")
             yield TemplateDetailPanel(id="detail-panel")
+        yield Label("", id="primary-action-hint")
         yield Footer()
 
     def on_mount(self) -> None:
         self.load_templates()
+        self.call_after_refresh(self._focus_template_list)
 
     def on_tabs_tab_activated(self, event: Tabs.TabActivated) -> None:
         if event.tab is None:
@@ -89,21 +100,19 @@ class SessionBrowserScreen(Screen):
         panel = self.query_one("#detail-panel", TemplateDetailPanel)
         if event.item is not None and isinstance(event.item, TemplateItem):
             panel.show_config(event.item.config)
+            self._update_primary_action_hint(event.item.config.title)
         else:
             panel.show_config(None)
+            self._update_primary_action_hint(None)
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
-        """Launch the selected template (Enter on ListView)."""
+        """Enter on the ListView opens a new run from the selected template."""
         if isinstance(event.item, TemplateItem):
-            from src.tui.screens.live_chat import LiveChatScreen
-            self.app.push_screen(LiveChatScreen(event.item.config))
+            from src.tui.screens.wizard import SetupWizardScreen
+            self.app.push_screen(SetupWizardScreen(event.item.config))
 
     def action_launch(self) -> None:
-        lv = self.query_one(ListView)
-        highlighted = lv.highlighted_child
-        if highlighted is not None and isinstance(highlighted, TemplateItem):
-            from src.tui.screens.live_chat import LiveChatScreen
-            self.app.push_screen(LiveChatScreen(highlighted.config))
+        self.action_new_session()
 
     def action_new_session(self) -> None:
         from src.tui.screens.wizard import SetupWizardScreen
@@ -150,9 +159,29 @@ class SessionBrowserScreen(Screen):
         for cfg in self._all_configs:
             if self._matches_filter(cfg):
                 lv.append(TemplateItem(cfg))
+        if list(lv.query(TemplateItem)):
+            lv.index = 0
+            first = next(iter(lv.query(TemplateItem)))
+            self.query_one("#detail-panel", TemplateDetailPanel).show_config(first.config)
+            self._update_primary_action_hint(first.config.title)
+        else:
+            self._update_primary_action_hint(None)
 
     def _matches_filter(self, config: SessionConfig) -> bool:
         if self._active_filter == "All":
             return True
         expected_type = _TYPE_MAP.get(self._active_filter, "")
         return config.type == expected_type
+
+    def _focus_template_list(self) -> None:
+        self.query_one("#template-list", ListView).focus()
+        if self._active_filter != "All":
+            self._active_filter = "All"
+            self._populate_list()
+
+    def _update_primary_action_hint(self, title: str | None) -> None:
+        label = self.query_one("#primary-action-hint", Label)
+        if title:
+            label.update(f"Primary action: Enter or n to create a new run from [bold]{title}[/bold].")
+        else:
+            label.update("Primary action: choose a template on the left to create a new run.")

@@ -735,6 +735,7 @@ class TestOneOhOneApp:
                 tabs = app.screen.query_one("#type-filter", Tabs)
                 assert tabs is not None
                 assert len(list(tabs.query(Tab))) == 6
+                assert tabs.active == "filter_all"
 
     async def test_browser_shows_empty_list_when_no_templates(self):
         """With no templates dir, ListView is empty (no crash)."""
@@ -752,7 +753,7 @@ class TestOneOhOneApp:
     async def test_browser_loads_templates_from_disk(self, tmp_path):
         """Templates in the configured directory appear in the ListView."""
         from src.tui.app import OneOhOneApp
-        from textual.widgets import ListView
+        from textual.widgets import Label, ListView
 
         template_yaml = """\
 title: "Test Chat"
@@ -788,6 +789,9 @@ transcript:
                 await pilot.pause()
                 lv = app.screen.query_one(ListView)
                 assert len(list(lv.query("ListItem"))) == 1
+                assert lv.has_focus
+                hint = app.screen.query_one("#primary-action-hint", Label)
+                assert "Primary action" in str(hint.render())
 
     async def test_browser_new_session_seeds_wizard_from_highlighted_template(self, tmp_path):
         from src.tui.app import OneOhOneApp
@@ -839,6 +843,50 @@ transcript:
                 await pilot.pause()
                 assert isinstance(app.screen, SetupWizardScreen)
                 assert app.screen.query_one("#input-title", Input).value == "Connect Four"
+
+    async def test_browser_enter_opens_seeded_wizard(self, tmp_path):
+        from src.tui.app import OneOhOneApp
+        from src.tui.screens.wizard import SetupWizardScreen
+        from textual.widgets import Input
+
+        template_yaml = """\
+title: "Battleship"
+description: "A seeded template"
+type: games
+setting: game
+topic: "Play Battleship."
+agents:
+  - id: captain_alpha
+    name: Commander Hayes
+    provider: openai
+    model: gpt-4o
+    role: player
+game:
+  plugin: battleship
+  name: "Battleship"
+orchestrator:
+  type: python
+  module: turn_based
+hitl:
+  enabled: false
+transcript:
+  auto_save: false
+  format: markdown
+  path: /tmp/
+"""
+        (tmp_path / "battleship.yaml").write_text(template_yaml)
+
+        with patch("src.tui.screens.browser.settings") as mock_settings:
+            mock_settings.session_templates_path = str(tmp_path)
+            app = OneOhOneApp()
+            async with app.run_test(headless=True, size=(100, 30)) as pilot:
+                await pilot.pause()
+                await pilot.pause()
+                await pilot.pause()
+                app.screen.action_launch()
+                await pilot.pause()
+                assert isinstance(app.screen, SetupWizardScreen)
+                assert app.screen.query_one("#input-title", Input).value == "Battleship"
 
 
 class TestLiveChatScreen:

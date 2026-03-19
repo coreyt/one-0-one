@@ -10,16 +10,61 @@ SessionBrowserScreen {
     height: 1fr;
 }
 
-#template-list {
+#browser-instructions {
+    padding: 0 2;
+    color: $text-muted;
+}
+
+#template-list-pane {
     width: 1fr;
     max-width: 50;
     min-width: 30;
     border-right: solid $panel;
+    padding: 1 1 0 1;
+}
+
+#template-list-title {
+    text-style: bold;
+    padding: 0 1 1 1;
+}
+
+#template-list {
+    height: 1fr;
 }
 
 #detail-panel {
     width: 2fr;
     padding: 1 2;
+}
+
+#primary-action-hint {
+    padding: 0 2;
+    color: $accent;
+    height: auto;
+}
+
+ListView:focus {
+    border: heavy $accent;
+}
+
+TemplateItem {
+    padding: 0 1;
+    margin-bottom: 1;
+    border-left: thick transparent;
+}
+
+TemplateItem.--highlight,
+TemplateItem:focus {
+    background: $boost;
+    border-left: thick $accent;
+}
+
+.template-row-title {
+    text-style: bold;
+}
+
+.template-row-description {
+    color: $text-muted;
 }
 
 .template-title {
