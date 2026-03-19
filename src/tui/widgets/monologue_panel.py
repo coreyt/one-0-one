@@ -33,6 +33,12 @@ class MonologuePanel(Widget):
         """Toggle the panel open/closed."""
         self.toggle_class("open")
 
+    def show_placeholder(self, header: str, text: str) -> None:
+        """Render a static explanation when monologue capture is unavailable."""
+        self.query_one("#mono-log", RichLog).clear()
+        self.query_one("#mono-header", Label).update(header)
+        self.query_one("#mono-log", RichLog).write(f"[dim]{text}[/dim]")
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------

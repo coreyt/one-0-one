@@ -265,6 +265,16 @@ class BattleshipGame:
             return None
         return GameAction(action_type="fire_shot", payload={"coordinate": match.group(1).upper()})
 
+    def parse_action_payload(self, payload: dict[str, Any]) -> GameAction | None:
+        """Build a typed action from structured player output."""
+        coordinate = payload.get("coordinate")
+        if not isinstance(coordinate, str):
+            return None
+        normalized = coordinate.strip().upper()
+        if _COORD_RE.fullmatch(normalized) is None:
+            return None
+        return GameAction(action_type="fire_shot", payload={"coordinate": normalized})
+
     @staticmethod
     def _target_player(players: list[str], actor_id: str) -> str:
         return next(player_id for player_id in players if player_id != actor_id)

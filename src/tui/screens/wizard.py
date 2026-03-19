@@ -90,6 +90,11 @@ _SETUP_LEVELS = [
 class AgentEditModal(ModalScreen[dict | None]):
     """Modal for editing a single agent's fields."""
 
+    BINDINGS = [
+        ("escape", "cancel", "Cancel"),
+        ("ctrl+s", "save", "Save"),
+    ]
+
     DEFAULT_CSS = """
     AgentEditModal {
         align: center middle;
@@ -143,23 +148,30 @@ class AgentEditModal(ModalScreen[dict | None]):
         self.query_one("#modal-persona", TextArea).load_text(
             self._agent.get("persona", "")
         )
+        self.set_focus(self.query_one("#modal-name", Input))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_save(self) -> None:
+        name = self.query_one("#modal-name", Input).value.strip() or "Agent"
+        agent_id = name.lower().replace(" ", "_")
+        result = {
+            "id": agent_id,
+            "name": name,
+            "provider": self.query_one("#modal-provider", Select).value,
+            "model": self.query_one("#modal-model", Input).value.strip(),
+            "role": self.query_one("#modal-role", Input).value.strip() or "participant",
+            "team": self.query_one("#modal-team", Input).value.strip() or None,
+            "persona": self.query_one("#modal-persona", TextArea).text.strip(),
+        }
+        self.dismiss(result)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "modal-save":
-            name = self.query_one("#modal-name", Input).value.strip() or "Agent"
-            agent_id = name.lower().replace(" ", "_")
-            result = {
-                "id": agent_id,
-                "name": name,
-                "provider": self.query_one("#modal-provider", Select).value,
-                "model": self.query_one("#modal-model", Input).value.strip(),
-                "role": self.query_one("#modal-role", Input).value.strip() or "participant",
-                "team": self.query_one("#modal-team", Input).value.strip() or None,
-                "persona": self.query_one("#modal-persona", TextArea).text.strip(),
-            }
-            self.dismiss(result)
+            self.action_save()
         else:
-            self.dismiss(None)
+            self.action_cancel()
 
 
 class SetupWizardScreen(Screen):
@@ -300,6 +312,13 @@ class SetupWizardScreen(Screen):
         summary.mount(Label("━━ Game Summary ━━", classes="section-header"))
         summary.mount(Static("", id="game-summary-body"))
         summary.display = False
+
+        pane.mount(Static(id="basic-gameplay-section"))
+        basic_gameplay = self.query_one("#basic-gameplay-section")
+        basic_gameplay.mount(Label("━━ Gameplay Options ━━", classes="section-header"))
+        basic_gameplay.mount(Label("Player Monologue:", classes="field-label"))
+        basic_gameplay.mount(Switch(value=False, id="input-player-monologue"))
+        basic_gameplay.display = False
 
         # ── Game Configuration (conditional) ──
         pane.mount(Static(id="game-config-section"))
@@ -476,6 +495,7 @@ class SetupWizardScreen(Screen):
             self._set_tab_visibility("tab_orchestrator", level == "advanced")
             self._set_section_visibility("#topic-metadata-section", level in {"intermediate", "advanced"})
             self._set_section_visibility("#game-summary-section", True)
+            self._set_section_visibility("#basic-gameplay-section", True)
             self._set_section_visibility("#game-config-section", level == "advanced")
             self._set_section_visibility("#advanced-section", level == "advanced")
             self._set_section_visibility("#transcript-section", level in {"intermediate", "advanced"})
@@ -490,6 +510,7 @@ class SetupWizardScreen(Screen):
             self._set_tab_visibility("tab_orchestrator", True)
             self._set_section_visibility("#topic-metadata-section", True)
             self._set_section_visibility("#game-summary-section", False)
+            self._set_section_visibility("#basic-gameplay-section", False)
             self._set_section_visibility("#game-config-section", False)
             self._set_section_visibility("#advanced-section", True)
             self._set_section_visibility("#transcript-section", True)
@@ -680,6 +701,7 @@ class SetupWizardScreen(Screen):
         if cfg.game:
             try:
                 self.query_one("#game-config-section").display = True
+                self.query_one("#basic-gameplay-section").display = True
                 self.query_one("#input-game-name", Input).value = cfg.game.name
                 self.query_one("#input-game-rules", TextArea).load_text(
                     "\n".join(cfg.game.rules)
@@ -691,6 +713,9 @@ class SetupWizardScreen(Screen):
                     str(cfg.game.max_rounds) if cfg.game.max_rounds else ""
                 )
                 self.query_one("#input-game-hitl", Switch).value = cfg.game.hitl_compatible
+                self.query_one("#input-player-monologue", Switch).value = any(
+                    agent.monologue for agent in cfg.agents if agent.role == "player"
+                )
             except Exception:
                 pass
 
@@ -855,6 +880,16 @@ class SetupWizardScreen(Screen):
                     "model": "claude-sonnet-4-6",
                     "role": "participant",
                 }]
+            if session_type == "games":
+                player_monologue = self.query_one("#input-player-monologue", Switch).value
+                normalized_agents: list[dict] = []
+                for agent in agents:
+                    updated = dict(agent)
+                    if updated.get("role") == "player":
+                        updated["monologue"] = player_monologue
+                        updated["monologue_mode"] = updated.get("monologue_mode") or "prompt"
+                    normalized_agents.append(updated)
+                agents = normalized_agents
 
             # Build channels from agent teams
             channels = self._build_channels_from_agents(agents)

@@ -108,7 +108,7 @@ class SessionEngine:
         self._transcript = TranscriptWriter(config)
         self._game_runtime = (
             self._build_game_runtime(config)
-            if config.game is not None and config.game.plugin
+            if self._uses_engine_authoritative_game(config)
             else None
         )
         self._pending_hitl_turn_inputs: asyncio.Queue[dict[str, str]] = asyncio.Queue()
@@ -124,9 +124,14 @@ class SessionEngine:
     def _should_auto_assign_personalities(config: SessionConfig) -> bool:
         if config.auto_assign_personalities is not None:
             return config.auto_assign_personalities
-        return not bool(
+        return not SessionEngine._uses_engine_authoritative_game(config)
+
+    @staticmethod
+    def _uses_engine_authoritative_game(config: SessionConfig) -> bool:
+        return bool(
             config.type == "games"
             and config.game is not None
+            and config.game.authority_mode == "engine_authoritative"
             and config.game.plugin
         )
 

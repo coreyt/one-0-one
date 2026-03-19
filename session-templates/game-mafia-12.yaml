@@ -8,6 +8,7 @@ max_turns: 200
 completion_signal: "WINS!"
 
 game:
+  authority_mode: llm_authoritative
   name: "Mafia"
   rules:
     - "The game alternates between Night Phase and Day Phase."

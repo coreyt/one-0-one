@@ -22,6 +22,7 @@ class Settings(BaseSettings):
 
     # Local LiteLLM router (airlock). Leave empty to call providers directly.
     litellm_router_url: str = ""
+    airlock_client: str = "one-0-one"
 
     # Filesystem paths
     sessions_path: Path = Path("./sessions")

@@ -351,3 +351,93 @@ class TestSystemPrompt:
         system = router.build_context("referee", state)[1]["content"]
         assert "role=presentation_referee" in system
         assert "Do not choose moves" in system
+
+    def test_battleship_player_context_gets_structured_shot_contract_without_hidden_enemy_state(self):
+        config = SessionConfig.model_validate({
+            "title": "Battleship",
+            "description": "Test",
+            "type": "games",
+            "setting": "game",
+            "topic": "Play Battleship.",
+            "agents": [
+                {"id": "admiral", "name": "Admiral", "provider": "p", "model": "m", "role": "moderator"},
+                {"id": "captain_alpha", "name": "Alpha", "provider": "p", "model": "m", "role": "player"},
+                {"id": "captain_beta", "name": "Beta", "provider": "p", "model": "m", "role": "player"},
+            ],
+            "game": GameConfig(plugin="battleship", name="Battleship").model_dump(),
+        })
+        router = ChannelRouter(config)
+        state = _make_state(config)
+        state.game_state.custom["game_type"] = "battleship"
+        state.game_state.custom["authoritative_state"] = {
+            "ship_positions": {
+                "captain_alpha": {"Carrier": ["A1", "A2", "A3", "A4", "A5"]},
+                "captain_beta": {"Carrier": ["B1", "B2", "B3", "B4", "B5"]},
+            }
+        }
+        state.game_state.custom["visible_states"] = {
+            "captain_alpha": {
+                "viewer_id": "captain_alpha",
+                "payload": {
+                    "active_player": "captain_alpha",
+                    "winner": None,
+                    "own_fleet": {
+                        "ship_positions": {"Carrier": [{"coordinate": "A1", "status": "intact"}]},
+                        "sunk_ships": [],
+                    },
+                    "attack_history": {},
+                    "last_shot": None,
+                },
+            }
+        }
+        state.game_state.custom["legal_actions"] = {
+            "captain_alpha": [{"action_type": "fire_shot", "input_schema": {"coordinate_pattern": "^[A-J](10|[1-9])$"}}]
+        }
+
+        system = router.build_context("captain_alpha", state)[1]["content"]
+        assert 'response_schema={"coordinate": "B5"}' in system
+        assert '"A1"' in system
+        assert '"B1"' not in system
+
+    def test_battleship_moderator_context_includes_authoritative_state(self):
+        config = SessionConfig.model_validate({
+            "title": "Battleship",
+            "description": "Test",
+            "type": "games",
+            "setting": "game",
+            "topic": "Play Battleship.",
+            "agents": [
+                {"id": "admiral", "name": "Admiral", "provider": "p", "model": "m", "role": "moderator"},
+                {"id": "captain_alpha", "name": "Alpha", "provider": "p", "model": "m", "role": "player"},
+                {"id": "captain_beta", "name": "Beta", "provider": "p", "model": "m", "role": "player"},
+            ],
+            "game": GameConfig(plugin="battleship", name="Battleship").model_dump(),
+        })
+        router = ChannelRouter(config)
+        state = _make_state(config)
+        state.game_state.custom["game_type"] = "battleship"
+        state.game_state.custom["authoritative_state"] = {
+            "ship_positions": {
+                "captain_alpha": {"Carrier": ["A1", "A2", "A3", "A4", "A5"]},
+                "captain_beta": {"Carrier": ["B1", "B2", "B3", "B4", "B5"]},
+            },
+            "attack_history": {"captain_alpha": {"B1": "hit"}},
+        }
+        state.game_state.custom["visible_states"] = {
+            "admiral": {
+                "viewer_id": "admiral",
+                "payload": {
+                    "active_player": "captain_beta",
+                    "winner": None,
+                    "own_fleet": {"ship_positions": {}, "sunk_ships": []},
+                    "attack_history": {},
+                    "last_shot": {"coordinate": "B1", "result": "hit"},
+                },
+            }
+        }
+        state.game_state.custom["legal_actions"] = {"admiral": []}
+
+        system = router.build_context("admiral", state)[1]["content"]
+        assert "role=presentation_referee" in system
+        assert "authoritative_state=" in system
+        assert '"B1"' in system

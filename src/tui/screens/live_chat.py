@@ -12,7 +12,7 @@ from src.games.connect_four import render_connect_four_board
 from src.session.config import SessionConfig
 from src.session.engine import SessionEngine
 from src.session.event_bus import EventBus
-from src.session.events import MessageEvent, SessionEndEvent, TurnEvent
+from src.session.events import IncidentEvent, MessageEvent, SessionEndEvent, TurnEvent
 from src.tui.widgets.agent_roster import AgentRoster
 from src.tui.widgets.channel_tabs import ChannelTabs
 from src.tui.widgets.hitl_input import HITLInputBar
@@ -72,6 +72,11 @@ class LiveChatScreen(Screen):
             if self._is_hitl_player_mode():
                 hitl_bar.display = False
                 self.query_one(MonologuePanel).display = False
+        elif not self._session_supports_monologue():
+            self.query_one(MonologuePanel).show_placeholder(
+                "▌ Monologue capture disabled",
+                "This session is configured for gameplay-only output.",
+            )
         # Start the session in a background worker
         self.run_worker(self._run_session_worker(), exclusive=True)
 
@@ -96,7 +101,7 @@ class LiveChatScreen(Screen):
             .filter(lambda e: e.type == "MESSAGE") \
             .subscribe(self._handle_chat_message)
 
-        if not self._is_hitl_player_mode():
+        if not self._is_hitl_player_mode() and self._session_supports_monologue():
             bus.stream() \
                 .filter(lambda e: e.type in ("MONOLOGUE", "TURN")) \
                 .subscribe(monologue_panel.handle_event)
@@ -106,7 +111,7 @@ class LiveChatScreen(Screen):
             .subscribe(turn_indicator.handle_turn)
 
         bus.stream() \
-            .filter(lambda e: e.type in ("GAME_STATE", "RULE_VIOLATION")) \
+            .filter(lambda e: e.type in ("GAME_STATE", "RULE_VIOLATION", "INCIDENT")) \
             .subscribe(self._on_system_event)
 
         bus.stream() \
@@ -140,19 +145,20 @@ class LiveChatScreen(Screen):
             text = f"Rule violation — {event.agent_id}: {event.rule}"
             self.query_one(ChannelTabs).append_system(text)
         elif event.type == "GAME_STATE":
-            if self._is_hitl_player_mode():
-                summary = self._human_game_state_summary()
-                if summary:
-                    self.query_one(ChannelTabs).append_system(summary)
-            else:
-                updates = ", ".join(f"{k}={v}" for k, v in event.updates.items())
-                self.query_one(ChannelTabs).append_system(f"Game state updated: {updates}")
+            summary = self._human_game_state_summary()
+            if summary:
+                self.query_one(ChannelTabs).append_system(summary)
+        elif event.type == "INCIDENT":
+            self.query_one(ChannelTabs).append_system(self._incident_summary(event))
 
     def _on_turn(self, event: TurnEvent) -> None:
         # Update agent roster status
         roster = self.query_one(AgentRoster)
         for agent_id in event.agent_ids:
             roster.set_status(agent_id, "thinking")
+        turn_summary = self._turn_summary(event)
+        if turn_summary:
+            self.query_one(ChannelTabs).append_system(turn_summary)
         if self._config.hitl.enabled:
             hitl_bar = self.query_one(HITLInputBar)
             if self._is_hitl_player_mode():
@@ -246,6 +252,9 @@ class LiveChatScreen(Screen):
         )
         return participant is not None and participant.team is not None
 
+    def _session_supports_monologue(self) -> bool:
+        return any(agent.monologue for agent in self._config.agents)
+
     def _human_can_see_channel(
         self,
         channel_id: str,
@@ -291,15 +300,36 @@ class LiveChatScreen(Screen):
         if self._config.hitl.see_non_public_information:
             payload = self._engine._game_runtime.state.model_dump()
             if game_type == "connect_four":
-                return self._format_connect_four_summary(payload)
+                return self._format_connect_four_summary(payload, prefix="Authoritative board")
             return f"Game state updated: {json.dumps(payload)}"
         participant_id = self._config.hitl.participant_agent_id
         if participant_id is None:
+            authoritative = self._engine._state.game_state.custom.get("authoritative_state") if self._engine._state else None
+            if game_type == "connect_four" and isinstance(authoritative, dict):
+                return self._format_connect_four_summary(authoritative, prefix="Authoritative board")
             return "Game state updated."
         visible_state = self._engine._game_runtime.visible_state(participant_id).model_dump()
         if game_type == "connect_four":
             return self._format_connect_four_summary(visible_state.get("payload", {}), prefix="Your game view")
         return f"Your game view: {json.dumps(visible_state)}"
+
+    def _turn_summary(self, event: TurnEvent) -> str | None:
+        if not event.agent_ids:
+            return None
+        names = [
+            next((agent.name for agent in self._config.agents if agent.id == agent_id), agent_id)
+            for agent_id in event.agent_ids
+        ]
+        if len(names) == 1:
+            return f"Turn {event.turn_number}: {names[0]} is thinking."
+        return f"Turn {event.turn_number}: {', '.join(names)} are thinking."
+
+    def _incident_summary(self, event: IncidentEvent) -> str:
+        detail = event.detail.strip().replace("\n", " ")
+        if len(detail) > 180:
+            detail = f"{detail[:177]}..."
+        label = "Timeout" if event.incident_type == "timeout" else "Provider error"
+        return f"{label} — {event.agent_name} ({event.model}): {detail}"
 
     @staticmethod
     def _format_connect_four_summary(payload: dict, prefix: str = "Game state updated") -> str:

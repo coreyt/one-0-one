@@ -167,6 +167,11 @@ async def test_session_runner_e2e_moderated_connect_four_writes_transcripts_and_
             model="test-model",
         ),
         CompletionResult(
+            text="Red controls the center.",
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+            model="test-model",
+        ),
+        CompletionResult(
             text="Column 5.",
             usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
             model="test-model",

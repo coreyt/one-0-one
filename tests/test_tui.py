@@ -19,11 +19,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from textual.app import App, ComposeResult
-from textual.widgets import DataTable, Input, Label, RichLog, Select, Static, Switch, Tab, Tabs
+from textual.widgets import Button, DataTable, Input, Label, RichLog, Select, Static, Switch, Tab, Tabs
 
 from src.session.config import AgentConfig
 from src.games import GameAction, GameRuntime, ModerationDecision, ScriptedModerationBackend
 from src.providers import CompletionResult, TokenUsage
+from src.providers import ProviderError
 from src.session.events import (
     ChannelCreatedEvent,
     MessageEvent,
@@ -916,6 +917,47 @@ transcript:
         assert built.game.moderation.moderator_agent_id == "referee"
         assert built.game.description == "Structured Connect Four."
 
+    async def test_agent_edit_modal_supports_escape_cancel_and_ctrl_s_save(self):
+        from src.tui.screens.wizard import AgentEditModal, SetupWizardScreen
+
+        class TestApp(App):
+            def __init__(self, screen):
+                super().__init__()
+                self._screen = screen
+
+            def on_mount(self) -> None:
+                self.push_screen(self._screen)
+
+        config = _make_live_chat_config(max_turns=4)
+        app = TestApp(SetupWizardScreen(config))
+
+        async with app.run_test(headless=True, size=(100, 30)) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+
+            wizard = app.screen
+            wizard.query_one("#btn-edit-agent", Button).press()
+            await pilot.pause()
+            assert isinstance(app.screen, AgentEditModal)
+
+            await pilot.press("escape")
+            await pilot.pause()
+            assert isinstance(app.screen, SetupWizardScreen)
+            assert wizard._wizard_agents[0]["name"] == "The Referee"
+
+            wizard.query_one("#btn-edit-agent", Button).press()
+            await pilot.pause()
+            assert isinstance(app.screen, AgentEditModal)
+
+            modal = app.screen
+            modal.query_one("#modal-name", Input).value = "Judge"
+            await pilot.press("ctrl+s")
+            await pilot.pause()
+
+            assert isinstance(app.screen, SetupWizardScreen)
+            assert wizard._wizard_agents[0]["name"] == "Judge"
+            assert wizard._wizard_agents[0]["id"] == "judge"
+
     async def test_game_wizard_defaults_to_basic_level_with_progressive_tabs(self, tmp_path):
         from src.tui.app import OneOhOneApp
         from src.tui.screens.wizard import SetupWizardScreen
@@ -967,7 +1009,57 @@ transcript:
                 assert tabs.query_one("#tab_agents", Tab).display is False
                 assert tabs.query_one("#tab_orchestrator", Tab).display is False
                 assert app.screen.query_one("#game-summary-section", Static).display is True
+                assert app.screen.query_one("#basic-gameplay-section", Static).display is True
                 assert app.screen.query_one("#topic-metadata-section", Static).display is False
+
+    async def test_game_wizard_basic_level_exposes_player_monologue_toggle(self):
+        from src.tui.screens.wizard import SetupWizardScreen
+
+        class TestApp(App):
+            def __init__(self, screen):
+                super().__init__()
+                self._screen = screen
+
+            def on_mount(self) -> None:
+                self.push_screen(self._screen)
+
+        config = _make_live_chat_config(max_turns=4, monologue=False)
+        app = TestApp(SetupWizardScreen(config))
+        async with app.run_test(headless=True, size=(100, 30)) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            screen = app.screen
+            assert screen.query_one("#input-setup-level", Select).value == "basic"
+            assert screen.query_one("#basic-gameplay-section", Static).display is True
+            assert screen.query_one("#input-player-monologue", Switch).value is False
+
+    async def test_game_wizard_basic_player_monologue_toggle_updates_player_agents_only(self):
+        from src.tui.screens.wizard import SetupWizardScreen
+
+        class TestApp(App):
+            def __init__(self, screen):
+                super().__init__()
+                self._screen = screen
+
+            def on_mount(self) -> None:
+                self.push_screen(self._screen)
+
+        config = _make_live_chat_config(max_turns=4, monologue=False)
+        app = TestApp(SetupWizardScreen(config))
+        async with app.run_test(headless=True, size=(100, 30)) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            screen = app.screen
+            screen.query_one("#input-player-monologue", Switch).value = True
+            built = screen._build_config()
+
+        assert built is not None
+        players = [agent for agent in built.agents if agent.role == "player"]
+        moderators = [agent for agent in built.agents if agent.role == "moderator"]
+        assert players
+        assert all(agent.monologue is True for agent in players)
+        assert all(agent.monologue_mode == "prompt" for agent in players)
+        assert all(agent.monologue is False for agent in moderators)
 
     async def test_game_wizard_hitl_sections_expand_by_level(self, tmp_path):
         from src.tui.app import OneOhOneApp
@@ -1067,12 +1159,81 @@ class TestLiveChatScreen:
                     logs = screen.query("RichLog")
                     line_count = sum(len(log.lines) for log in logs)
                     mono_log = screen.query_one("#mono-log", RichLog)
+                    public_log = screen.query_one("#log_public", RichLog)
+                    public_text = "\n".join(str(line) for line in public_log.lines)
                     turn_label = screen.query_one("#turn-label", Label)
 
                     assert line_count > 0
                     assert len(mono_log.lines) > 0
+                    assert "Authoritative board" in public_text
+                    assert "Active player:" in public_text
+                    assert "Winner:" in public_text
                     assert "ended" in str(turn_label.render()).lower()
                     assert any("Session ended" in message for message, _ in app.notifications)
+
+    async def test_live_chat_shows_monologue_disabled_placeholder_for_gameplay_only_sessions(self):
+        from src.tui.screens.live_chat import LiveChatScreen
+
+        runtime = _build_live_chat_runtime()
+        responses = [
+            CompletionResult(
+                text='{"column": 4}',
+                usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+                model="test-model",
+            ),
+            CompletionResult(
+                text='{"column": 4}',
+                usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+                model="test-model",
+            ),
+            CompletionResult(
+                text="Red opens in the center.",
+                usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+                model="test-model",
+            ),
+        ]
+
+        with patch("src.session.engine.GameRuntime.from_session_config", return_value=runtime):
+            with patch("src.session.engine.LiteLLMClient") as MockClient:
+                MockClient.return_value.complete = AsyncMock(side_effect=responses)
+                app = LiveChatTestApp(LiveChatScreen(_make_live_chat_config(monologue=False, max_turns=1)))
+                async with app.run_test(headless=True, size=(120, 40)) as pilot:
+                    await pilot.pause()
+                    await pilot.pause()
+
+                    screen = app.screen
+                    mono_header = screen.query_one("#mono-header", Label)
+                    mono_log = screen.query_one("#mono-log", RichLog)
+                    mono_text = "\n".join(str(line) for line in mono_log.lines)
+
+                    assert "Monologue capture disabled" in str(mono_header.render())
+                    assert "gameplay-only output" in mono_text
+
+    async def test_live_chat_surfaces_provider_incidents_in_public_log(self):
+        from src.tui.screens.live_chat import LiveChatScreen
+
+        error = ProviderError(
+            "Rate limit exceeded for openai/gpt-4o.",
+            provider="openai",
+            model="gpt-4o",
+        )
+
+        with patch("src.session.engine.LiteLLMClient") as MockClient:
+            MockClient.return_value.complete = AsyncMock(side_effect=[error, error, error])
+            app = LiveChatTestApp(LiveChatScreen(_make_live_chat_config(max_turns=1)))
+            async with app.run_test(headless=True, size=(120, 40)) as pilot:
+                await pilot.pause()
+                await pilot.pause()
+                await pilot.pause()
+                await pilot.pause()
+                await pilot.pause()
+
+                screen = app.screen
+                public_log = screen.query_one("#log_public", RichLog)
+                public_text = "\n".join(str(line) for line in public_log.lines)
+
+                assert "Provider error" in public_text
+                assert "Rate limit exceeded" in public_text
 
     async def test_live_chat_runs_battleship_and_renders_terminal_state(self):
         from src.tui.screens.live_chat import LiveChatScreen

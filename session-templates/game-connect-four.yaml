@@ -8,6 +8,7 @@ max_turns: 80
 auto_assign_personalities: false
 
 game:
+  authority_mode: engine_authoritative
   plugin: connect_four
   name: "Connect Four"
   moderation:

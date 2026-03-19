@@ -62,6 +62,14 @@ class TestBattleshipVisibilityAndParsing:
         assert action.action_type == "fire_shot"
         assert action.payload["coordinate"] == "B5"
 
+    def test_parse_action_payload_extracts_coordinate(self):
+        game = BattleshipGame()
+        action = game.parse_action_payload({"coordinate": "a10"})
+
+        assert action is not None
+        assert action.action_type == "fire_shot"
+        assert action.payload["coordinate"] == "A10"
+
     def test_visible_state_hides_opponent_ship_positions(self):
         game = BattleshipGame()
         state = game.initial_state(_config(), _agents())

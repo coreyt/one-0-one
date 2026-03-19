@@ -136,6 +136,7 @@ class LLMDefaults(BaseModel):
 
 
 class GameConfig(BaseModel):
+    authority_mode: Literal["engine_authoritative", "llm_authoritative"] | None = None
     plugin: str | None = None
     name: str
     description: str = ""
@@ -147,6 +148,24 @@ class GameConfig(BaseModel):
     hitl_compatible: bool = True
     max_rounds: int | None = None
     moderation: GameModerationConfig = Field(default_factory=GameModerationConfig)
+
+    @model_validator(mode="after")
+    def validate_authority_mode(self) -> "GameConfig":
+        if self.authority_mode is None:
+            self.authority_mode = (
+                "engine_authoritative"
+                if self.plugin
+                else "llm_authoritative"
+            )
+        if self.authority_mode == "engine_authoritative" and not self.plugin:
+            raise ValueError(
+                "engine_authoritative games require a game.plugin implementation"
+            )
+        if self.authority_mode == "llm_authoritative" and self.plugin:
+            raise ValueError(
+                "plugin-backed games must use authority_mode='engine_authoritative'"
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------

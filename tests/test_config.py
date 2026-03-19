@@ -162,6 +162,39 @@ class TestCrossFieldValidation:
             config.game.moderation.failure_policy.moderator_retry_exhaustion_action
             == "session_error"
         )
+        assert config.game.authority_mode == "engine_authoritative"
+
+    def test_game_without_plugin_defaults_to_llm_authoritative(self):
+        cfg = self._base_config(
+            type="games",
+            game={"name": "Mafia"},
+        )
+        config = SessionConfig.model_validate(cfg)
+        assert config.game is not None
+        assert config.game.authority_mode == "llm_authoritative"
+
+    def test_engine_authoritative_requires_plugin(self):
+        cfg = self._base_config(
+            type="games",
+            game={
+                "name": "Mafia",
+                "authority_mode": "engine_authoritative",
+            },
+        )
+        with pytest.raises(ValidationError, match="engine_authoritative"):
+            SessionConfig.model_validate(cfg)
+
+    def test_llm_authoritative_rejects_plugin_backed_game(self):
+        cfg = self._base_config(
+            type="games",
+            game={
+                "plugin": "connect_four",
+                "name": "Connect Four",
+                "authority_mode": "llm_authoritative",
+            },
+        )
+        with pytest.raises(ValidationError, match="plugin-backed games"):
+            SessionConfig.model_validate(cfg)
 
     def test_llm_moderated_mode_requires_moderator_agent_id(self):
         cfg = self._base_config(

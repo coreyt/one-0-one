@@ -71,6 +71,12 @@ For plugin-backed games:
 - Focus on gameplay only.
 - If your game prompt gives you a structured response contract, follow it exactly."""
 
+_LLM_AUTHORITY_GAME_FRAMING = """
+IMPORTANT CONTEXT: You are participating in a moderator-run game called "{game_name}".
+The moderator/referee is responsible for adjudication and state progression. Stay in role,
+follow the game rules, and do not assume there is an engine-owned authoritative board unless
+the moderator explicitly establishes one in the conversation."""
+
 
 def _build_system_prompt(agent: "AgentConfig", config: "SessionConfig") -> str:
     """Construct the system prompt for an agent."""
@@ -78,11 +84,11 @@ def _build_system_prompt(agent: "AgentConfig", config: "SessionConfig") -> str:
 
     # Game-context framing goes first so all models understand the fiction context
     if config.setting == "game" and config.game is not None:
-        if config.game.plugin:
+        if config.game.authority_mode == "engine_authoritative":
             parts.append(_PLUGIN_GAME_FRAMING.format(game_name=config.game.name))
             parts.append(_PLUGIN_GAME_ACTION_DISCIPLINE)
         else:
-            parts.append(_GAME_FRAMING.format(game_name=config.game.name))
+            parts.append(_LLM_AUTHORITY_GAME_FRAMING.format(game_name=config.game.name))
 
     profile = resolve_personality(agent.personality_id, agent.personality)
     if profile is not None:
@@ -181,6 +187,9 @@ class ChannelRouter:
             "visible_state": viewer_payload,
             "legal_actions": viewer_actions or [],
         }
+        if agent.role == "moderator":
+            payload["authoritative_state"] = authoritative
+            payload["authority_mode"] = "engine_authoritative"
         if custom.get("game_type") == "connect_four" and isinstance(viewer_payload, dict):
             board = viewer_payload.get("board")
             if isinstance(board, list):
@@ -223,6 +232,34 @@ class ChannelRouter:
                     "role": "system",
                     "content": "\n".join(details),
                 }
+        if custom.get("game_type") == "battleship" and isinstance(viewer_payload, dict):
+            details = ["[Authoritative game view]"]
+            if agent.role == "moderator":
+                details.extend(
+                    [
+                        "role=presentation_referee",
+                        "Read authoritative_state to narrate hit/miss/sunk results and both tracking grids.",
+                        "Do not validate moves or decide the winner yourself.",
+                        "Do not reveal hidden ship coordinates that have not been observed in play unless the game is already over.",
+                        f"authoritative_state={json.dumps(authoritative)}",
+                        f"visible_state={json.dumps(viewer_payload)}",
+                    ]
+                )
+            else:
+                details.extend(
+                    [
+                        'response_schema={"coordinate": "B5"}',
+                        'response_example={"coordinate": "A10"}',
+                        "Return exactly one JSON object and no surrounding prose.",
+                        "Use only your visible state and prior observed results; do not infer hidden enemy ship locations as facts.",
+                        f"visible_state={json.dumps(viewer_payload)}",
+                        f"legal_actions={json.dumps(payload['legal_actions'])}",
+                    ]
+                )
+            return {
+                "role": "system",
+                "content": "\n".join(details),
+            }
         return {
             "role": "system",
             "content": f"[Authoritative game view] {json.dumps(payload)}",
@@ -301,7 +338,11 @@ class ChannelRouter:
 
     def _uses_authoritative_game_runtime(self) -> bool:
         game = self._config.game
-        return bool(game is not None and game.plugin)
+        return bool(
+            game is not None
+            and game.authority_mode == "engine_authoritative"
+            and game.plugin
+        )
 
     @staticmethod
     def _channel_prefix(event: "SessionEvent") -> str:
