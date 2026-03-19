@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 from src.games import GameAction, GameRuntime, ModerationDecision, ScriptedModerationBackend
 from src.providers import CompletionResult, MonologueSegment, TokenUsage
-from src.session.config import AgentConfig, GameConfig, HITLConfig, OrchestratorConfig, SessionConfig, TranscriptConfig
+from src.session.config import AgentConfig, ChannelConfig, GameConfig, HITLConfig, OrchestratorConfig, SessionConfig, TranscriptConfig
 from src.session.engine import SessionEngine
 from src.session.event_bus import EventBus
 
@@ -299,25 +299,28 @@ async def test_session_runner_e2e_battleship_reaches_terminal_state_without_hidd
     config = _battleship_config(tmp_path, max_turns=33)
     bus = EventBus()
     captured_messages: list[list[dict]] = []
-    responses = [
-        "B1", "A10",
-        "B2", "A9",
-        "B3", "A8",
-        "B4", "A7",
-        "B5", "A6",
-        "D1", "J10",
-        "D2", "J9",
-        "D3", "J8",
-        "D4", "J7",
-        "F1", "J6",
-        "F2", "I10",
-        "F3", "I9",
-        "H1", "I8",
-        "H2", "I7",
-        "H3", "I6",
-        "J1", "H10",
-        "J2",
+    runtime = GameRuntime.from_session_config(config)
+    beta_targets = [
+        coordinate
+        for _, coordinates in runtime.state.ship_positions["captain_beta"].items()
+        for coordinate in coordinates
     ]
+    alpha_occupied = {
+        coordinate
+        for _, coordinates in runtime.state.ship_positions["captain_alpha"].items()
+        for coordinate in coordinates
+    }
+    beta_misses = [
+        f"{column}{row}"
+        for column in "ABCDEFGHIJ"
+        for row in range(1, 11)
+        if f"{column}{row}" not in alpha_occupied
+    ]
+    responses: list[str] = []
+    for index, beta_target in enumerate(beta_targets):
+        responses.append(beta_target)
+        if index < len(beta_targets) - 1:
+            responses.append(beta_misses[index])
     completions = [
         CompletionResult(
             text=text,
@@ -331,10 +334,11 @@ async def test_session_runner_e2e_battleship_reaches_terminal_state_without_hidd
         captured_messages.append(kwargs["messages"])
         return completions.pop(0)
 
-    with patch("src.session.engine.LiteLLMClient") as MockClient:
-        MockClient.return_value.complete = AsyncMock(side_effect=capture_complete)
-        engine = SessionEngine(config, bus)
-        state = await engine.run()
+    with patch("src.session.engine.GameRuntime.from_session_config", return_value=runtime):
+        with patch("src.session.engine.LiteLLMClient") as MockClient:
+            MockClient.return_value.complete = AsyncMock(side_effect=capture_complete)
+            engine = SessionEngine(config, bus)
+            state = await engine.run()
 
     authoritative = state.game_state.custom["authoritative_state"]
     assert authoritative["winner"] == "captain_alpha"
@@ -346,3 +350,157 @@ async def test_session_runner_e2e_battleship_reaches_terminal_state_without_hidd
     transcripts = sorted(tmp_path.glob("*.json"))
     payload = json.loads(transcripts[0].read_text(encoding="utf-8"))
     assert any(event["type"] == "GAME_STATE" for event in payload["events"])
+
+
+async def test_session_runner_e2e_deterministic_mafia_runs_night_day_and_reaches_terminal_win(tmp_path):
+    config = SessionConfig(
+        title="Mafia E2E",
+        description="Deterministic Mafia end to end",
+        type="games",
+        setting="game",
+        topic="Play Mafia.",
+        agents=[
+            AgentConfig(id="moderator", name="Narrator", provider="anthropic", model="m", role="moderator"),
+            AgentConfig(id="mafia_don", name="Don Corvo", provider="openai", model="m", role="mafia", team="mafia"),
+            AgentConfig(id="mafia_soldier", name="Sal Bricks", provider="google", model="m", role="mafia", team="mafia"),
+            AgentConfig(id="mafia_consigliere", name="Luca Moretti", provider="anthropic", model="m", role="mafia", team="mafia"),
+            AgentConfig(id="detective", name="Iris Sharp", provider="anthropic", model="m", role="detective"),
+            AgentConfig(id="doctor", name="Dante Mend", provider="openai", model="m", role="doctor"),
+            AgentConfig(id="villager_1", name="Rosa Fields", provider="google", model="m", role="villager"),
+            AgentConfig(id="villager_2", name="Marco Stone", provider="anthropic", model="m", role="villager"),
+            AgentConfig(id="villager_3", name="Cleo Vance", provider="openai", model="m", role="villager"),
+            AgentConfig(id="villager_4", name="Reed Cole", provider="google", model="m", role="villager"),
+        ],
+        channels=[ChannelConfig(id="mafia", type="team", members=["mafia_don", "mafia_soldier", "mafia_consigliere"])],
+        game=GameConfig(plugin="mafia", name="Mafia"),
+        orchestrator=OrchestratorConfig(type="python", module="turn_based"),
+        hitl=HITLConfig(enabled=False),
+        transcript=TranscriptConfig(auto_save=True, format="both", path=tmp_path),
+        max_turns=20,
+    )
+    bus = EventBus()
+
+    runtime = GameRuntime.from_session_config(config)
+    runtime.state.phase = "night_mafia_discussion"
+    runtime.state.round_number = 3
+    runtime.state.alive_players = ["mafia_don", "detective", "doctor", "villager_2", "villager_3"]
+    runtime.state.eliminated = ["mafia_soldier", "mafia_consigliere", "villager_1", "villager_4"]
+    runtime.state.revealed_roles = {
+        "mafia_soldier": "mafia",
+        "mafia_consigliere": "mafia",
+        "villager_1": "villager",
+        "villager_4": "villager",
+    }
+    runtime.state.discussion_order = ["mafia_don"]
+    runtime.state.discussion_index = 0
+    runtime.state.current_vote_order = ["mafia_don"]
+    runtime.state.vote_index = 0
+    runtime.state.doctor_history = ["villager_2"]
+
+    responses = [
+        CompletionResult(
+            text="<team>I need detective gone.</team>",
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+            model="player-model",
+        ),
+        CompletionResult(
+            text='{"target": "detective"}',
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+            model="player-model",
+            parsed_action={"target": "detective"},
+        ),
+        CompletionResult(
+            text='{"investigate": "mafia_don"}',
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+            model="player-model",
+            parsed_action={"investigate": "mafia_don"},
+        ),
+        CompletionResult(
+            text='{"protect": "villager_3"}',
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+            model="player-model",
+            parsed_action={"protect": "villager_3"},
+        ),
+        CompletionResult(
+            text="Dawn breaks over Ravenhollow as the town learns who was lost in the dark.",
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+            model="narrator-model",
+        ),
+        CompletionResult(
+            text="I know enough now. Don Corvo is the last wolf.",
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+            model="player-model",
+        ),
+        CompletionResult(
+            text="I agree. Don Corvo doesn't survive this day.",
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+            model="player-model",
+        ),
+        CompletionResult(
+            text="The evidence points to Don Corvo.",
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+            model="player-model",
+        ),
+        CompletionResult(
+            text="Don Corvo is Mafia. Vote him out.",
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+            model="player-model",
+        ),
+        CompletionResult(
+            text='{"vote_for": "doctor"}',
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+            model="player-model",
+            parsed_action={"vote_for": "doctor"},
+        ),
+        CompletionResult(
+            text='{"vote_for": "mafia_don"}',
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+            model="player-model",
+            parsed_action={"vote_for": "mafia_don"},
+        ),
+        CompletionResult(
+            text='{"vote_for": "mafia_don"}',
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+            model="player-model",
+            parsed_action={"vote_for": "mafia_don"},
+        ),
+        CompletionResult(
+            text='{"vote_for": "mafia_don"}',
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+            model="player-model",
+            parsed_action={"vote_for": "mafia_don"},
+        ),
+        CompletionResult(
+            text="The square erupts as Don Corvo is dragged into the light and the last wolf falls.",
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+            model="narrator-model",
+        ),
+    ]
+
+    with patch("src.session.engine.GameRuntime.from_session_config", return_value=runtime):
+        with patch("src.session.engine.LiteLLMClient") as MockClient:
+            MockClient.return_value.complete = AsyncMock(side_effect=responses)
+            engine = SessionEngine(config, bus)
+            state = await engine.run()
+
+    assert state.end_reason == "win_condition"
+    authoritative = state.game_state.custom["authoritative_state"]
+    assert authoritative["winner"] == "town"
+    assert "mafia_don" in authoritative["eliminated"]
+
+    transcripts = sorted(tmp_path.glob("*.json"))
+    assert transcripts
+    payload = json.loads(transcripts[0].read_text(encoding="utf-8"))
+    assert any(
+        event["type"] == "MESSAGE"
+        and event["agent_id"] == "game_engine"
+        and event.get("recipient_id") == "detective"
+        for event in payload["events"]
+    )
+    assert any(
+        event["type"] == "MESSAGE"
+        and event["agent_id"] == "game_engine"
+        and "night 3 result" in event["text"].lower()
+        for event in payload["events"]
+    )
+    assert any(event["type"] == "SESSION_END" and event["reason"] == "win_condition" for event in payload["events"])

@@ -144,6 +144,34 @@ def _make_connect_four_llm_moderated_config(*, max_turns: int = 4) -> SessionCon
     return config
 
 
+def _make_mafia_config(*, max_turns: int = 40) -> SessionConfig:
+    return SessionConfig(
+        title="Mafia Integration",
+        description="Deterministic Mafia integration test",
+        type="games",
+        setting="game",
+        topic="Play Mafia.",
+        agents=[
+            AgentConfig(id="moderator", name="Narrator", provider="anthropic", model="m", role="moderator"),
+            AgentConfig(id="mafia_don", name="Don Corvo", provider="openai", model="m", role="mafia", team="mafia"),
+            AgentConfig(id="mafia_soldier", name="Sal Bricks", provider="google", model="m", role="mafia", team="mafia"),
+            AgentConfig(id="mafia_consigliere", name="Luca Moretti", provider="anthropic", model="m", role="mafia", team="mafia"),
+            AgentConfig(id="detective", name="Iris Sharp", provider="anthropic", model="m", role="detective"),
+            AgentConfig(id="doctor", name="Dante Mend", provider="openai", model="m", role="doctor"),
+            AgentConfig(id="villager_1", name="Rosa Fields", provider="google", model="m", role="villager"),
+            AgentConfig(id="villager_2", name="Marco Stone", provider="anthropic", model="m", role="villager"),
+            AgentConfig(id="villager_3", name="Cleo Vance", provider="openai", model="m", role="villager"),
+            AgentConfig(id="villager_4", name="Reed Cole", provider="google", model="m", role="villager"),
+        ],
+        channels=[ChannelConfig(id="mafia", type="team", members=["mafia_don", "mafia_soldier", "mafia_consigliere"])],
+        game=GameConfig(plugin="mafia", name="Mafia"),
+        orchestrator=OrchestratorConfig(type="python", module="turn_based"),
+        hitl=HITLConfig(enabled=False),
+        transcript=TranscriptConfig(auto_save=False, format="markdown", path="/tmp/"),
+        max_turns=max_turns,
+    )
+
+
 def _make_connect_four_hybrid_audit_config(*, max_turns: int = 4) -> SessionConfig:
     config = _make_connect_four_config(max_turns=max_turns)
     config.game.moderation.mode = "hybrid_audit"  # type: ignore[union-attr]
@@ -1712,3 +1740,67 @@ class TestPrivateChannelCreation:
         # Regardless of how many turns produced private messages, each unique channel fires once
         channel_ids = [e.channel_id for e in private_ch]
         assert len(channel_ids) == len(set(channel_ids))
+
+
+class TestAuthoritativeMafia:
+    async def test_mafia_discussion_turns_advance_and_private_results_emit(self):
+        config = _make_mafia_config(max_turns=8)
+        bus = EventBus()
+        events = _setup_event_capture(bus)
+        responses = [
+            _make_result("<team>Target Rosa first.</team>"),
+            _make_result("<team>Agreed.</team>"),
+            _make_result("<team>Do it.</team>"),
+            CompletionResult(
+                text='{"target": "villager_1"}',
+                usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+                model="test-model",
+                parsed_action={"target": "villager_1"},
+            ),
+            CompletionResult(
+                text='{"target": "villager_1"}',
+                usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+                model="test-model",
+                parsed_action={"target": "villager_1"},
+            ),
+            CompletionResult(
+                text='{"target": "villager_1"}',
+                usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+                model="test-model",
+                parsed_action={"target": "villager_1"},
+            ),
+            CompletionResult(
+                text='{"investigate": "mafia_don"}',
+                usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+                model="test-model",
+                parsed_action={"investigate": "mafia_don"},
+            ),
+            CompletionResult(
+                text='{"protect": "villager_2"}',
+                usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+                model="test-model",
+                parsed_action={"protect": "villager_2"},
+            ),
+        ]
+
+        with patch("src.session.engine.LiteLLMClient") as MockClient:
+            MockClient.return_value.complete = AsyncMock(side_effect=responses)
+            with patch("src.session.engine.TranscriptWriter") as MockWriter:
+                MockWriter.return_value.record = MagicMock()
+                MockWriter.return_value.flush = AsyncMock()
+                engine = SessionEngine(config, bus)
+                state = await engine.run()
+
+        detective_private = [
+            e for e in events
+            if e.type == "MESSAGE" and e.agent_id == "game_engine" and e.recipient_id == "detective"
+        ]
+        public_game = [
+            e for e in events
+            if e.type == "MESSAGE" and e.agent_id == "game_engine" and e.channel_id == "public"
+        ]
+        assert detective_private
+        assert "mafia" in detective_private[0].text.lower()
+        assert public_game
+        assert "night 1 result" in public_game[0].text.lower()
+        assert state.game_state.custom["authoritative_state"]["phase"] == "day_discussion"

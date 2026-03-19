@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from src.games.battleship import BattleshipGame
 from src.games.connect_four import ConnectFourGame
+from src.games.mafia import MafiaGame
 from src.games.contracts import Game
 from src.session.config import GameConfig
 
@@ -13,6 +14,8 @@ def load_game(plugin_name: str) -> Game:
     normalized = plugin_name.strip().lower().replace(" ", "_").replace("-", "_")
     if normalized == "battleship":
         return BattleshipGame()
+    if normalized == "mafia":
+        return MafiaGame()
     if normalized in {"connect_four", "connect4"}:
         return ConnectFourGame()
     raise ValueError(f"Unknown game plugin: {plugin_name!r}")

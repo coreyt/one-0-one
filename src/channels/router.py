@@ -260,6 +260,80 @@ class ChannelRouter:
                 "role": "system",
                 "content": "\n".join(details),
             }
+        if custom.get("game_type") == "mafia" and isinstance(viewer_payload, dict):
+            details = ["[Authoritative game view]"]
+            phase = viewer_payload.get("phase")
+            current_speaker = viewer_payload.get("current_speaker")
+            if agent.role == "moderator":
+                details.extend(
+                    [
+                        "role=presentation_referee",
+                        "Narrate only the authoritative state shown here.",
+                        "Do not decide votes, deaths, investigations, saves, or winners.",
+                        "Use the public game-generated events as the factual basis for announcements.",
+                        f"authoritative_state={json.dumps(authoritative)}",
+                        f"visible_state={json.dumps(viewer_payload)}",
+                    ]
+                )
+            elif viewer_actions:
+                if phase == "night_mafia_vote":
+                    details.extend(
+                        [
+                            'response_schema={"target": "<agent_id>"}',
+                            'response_example={"target": "villager_1"}',
+                        ]
+                    )
+                elif phase == "night_detective":
+                    details.extend(
+                        [
+                            'response_schema={"investigate": "<agent_id>"}',
+                            'response_example={"investigate": "mafia_don"}',
+                        ]
+                    )
+                elif phase == "night_doctor":
+                    details.extend(
+                        [
+                            'response_schema={"protect": "<agent_id>"}',
+                            'response_example={"protect": "detective"}',
+                        ]
+                    )
+                elif phase == "day_vote":
+                    details.extend(
+                        [
+                            'response_schema={"vote_for": "<agent_id>|null"}',
+                            'response_example={"vote_for": "mafia_don"}',
+                        ]
+                    )
+                details.extend(
+                    [
+                        "Return exactly one JSON object and no surrounding prose.",
+                        "Only the authoritative game view matters.",
+                    ]
+                )
+            else:
+                details.extend(
+                    [
+                        "This is a discussion turn. Respond with normal in-character dialogue only.",
+                        "Do not return JSON unless the authoritative view says this is an action phase.",
+                    ]
+                )
+                if phase == "night_mafia_discussion":
+                    details.append("Use the mafia channel for secret coordination.")
+                else:
+                    details.append("Speak publicly to persuade, accuse, defend, or claim roles if useful.")
+            details.extend(
+                [
+                    f"phase={phase}",
+                    f"round_number={viewer_payload.get('round_number')}",
+                    f"current_speaker={json.dumps(current_speaker)}",
+                    f"visible_state={json.dumps(viewer_payload)}",
+                    f"legal_actions={json.dumps(payload['legal_actions'])}",
+                ]
+            )
+            return {
+                "role": "system",
+                "content": "\n".join(details),
+            }
         return {
             "role": "system",
             "content": f"[Authoritative game view] {json.dumps(payload)}",

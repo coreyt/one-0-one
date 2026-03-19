@@ -33,6 +33,18 @@ class TextActionParser(Protocol):
     def parse_action_text(self, text: str) -> GameAction | None: ...
 
 
+@runtime_checkable
+class MessageTurnHandler(Protocol):
+    """Optional protocol for games with active message-only turns."""
+
+    def apply_message_turn(
+        self,
+        state: GameStateBase,
+        actor_id: str,
+        public_message: str,
+    ) -> ApplyResult: ...
+
+
 class GameRuntime:
     """Holds one authoritative game instance and its current state."""
 
@@ -82,12 +94,15 @@ class GameRuntime:
         return cls(game=game, state=state, moderation_backend=backend)
 
     def visible_state(self, viewer_id: str) -> VisibleGameState:
+        self._sync_moderation_state()
         return self.game.visible_state(self.state, viewer_id)
 
     def turn_context(self) -> TurnContext:
+        self._sync_moderation_state()
         return self.game.turn_context(self.state)
 
     def legal_actions(self, actor_id: str) -> list[ActionSpec]:
+        self._sync_moderation_state()
         return self.game.legal_actions(self.state, actor_id)
 
     def validate_action(
@@ -95,6 +110,7 @@ class GameRuntime:
         actor_id: str,
         action: GameAction,
     ) -> ValidationResult:
+        self._sync_moderation_state()
         return self.game.validate_action(self.state, actor_id, action)
 
     def apply_action(
@@ -102,9 +118,24 @@ class GameRuntime:
         actor_id: str,
         action: GameAction,
     ) -> ApplyResult:
+        self._sync_moderation_state()
         result = self.game.apply_action(self.state, actor_id, action)
         self.state = result.next_state
+        self._sync_moderation_state()
         return result
+
+    def apply_message_turn(
+        self,
+        actor_id: str,
+        public_message: str,
+    ) -> ApplyResult | None:
+        self._sync_moderation_state()
+        if isinstance(self.game, MessageTurnHandler):
+            result = self.game.apply_message_turn(self.state, actor_id, public_message)
+            self.state = result.next_state
+            self._sync_moderation_state()
+            return result
+        return None
 
     def parse_action_text(self, text: str) -> GameAction | None:
         if isinstance(self.game, TextActionParser):
@@ -112,7 +143,13 @@ class GameRuntime:
         return None
 
     def is_terminal(self) -> bool:
+        self._sync_moderation_state()
         return self.game.is_terminal(self.state)
 
     def outcome(self) -> GameOutcome | None:
+        self._sync_moderation_state()
         return self.game.outcome(self.state)
+
+    def _sync_moderation_state(self) -> None:
+        if hasattr(self.moderation_backend, "state"):
+            self.moderation_backend.state = self.state

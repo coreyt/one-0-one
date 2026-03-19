@@ -8,24 +8,25 @@ max_turns: 120
 completion_signal: "WINS!"
 
 game:
-  authority_mode: llm_authoritative
+  authority_mode: engine_authoritative
+  plugin: mafia
   name: "Mafia"
   rules:
     - "The game alternates between Night Phase and Day Phase."
-    - "NIGHT PHASE: Mafia privately agree on one target to eliminate. The Detective investigates one player. The Doctor protects one player (not the same player two nights running)."
-    - "DAY PHASE: The Narrator announces who died (or who the Doctor saved). Players discuss and vote to eliminate a suspect. The eliminated player's role is revealed."
+    - "NIGHT PHASE: The Mafia privately discuss, then each submit a kill vote. The Detective investigates one player. The Doctor protects one player and cannot protect the same player two nights in a row."
+    - "DAY PHASE: The engine resolves the night, announces who died or was saved, then the living players discuss and vote to eliminate a suspect."
     - "Mafia members know each other's identities. No other players know anyone's role."
-    - "Players must not directly reveal their role; they may hint, argue, and deceive."
+    - "Players may claim, conceal, or lie about their role during discussion."
     - "WIN - Town: All Mafia members eliminated."
-    - "WIN - Mafia: Mafia count equals or exceeds Town count at the start of any Day Phase."
+    - "WIN - Mafia: Mafia count equals or exceeds Town count."
   how_to_play: >
-    Roles are secret — embedded in each agent's persona.
-    NIGHT: Narrator opens night. Mafia coordinate on the mafia channel. Narrator simulates
-    Detective and Doctor actions. Narrator resolves and opens Day.
-    DAY: Narrator announces the night's result and surviving players. Players discuss.
-    After 3–4 rounds, Narrator calls the vote. Players each state their vote. Majority
-    eliminates; ties re-vote then coin-flip. Narrator reveals the eliminated player's role.
-  turn_order: moderator-driven
+    Roles are secret and enforced by the engine.
+    NIGHT: Living Mafia discuss on the mafia channel, then submit structured kill votes.
+    The Detective and Doctor each submit one structured night action if alive.
+    DAY: The engine announces the night result. Each living player gets one public
+    discussion turn, then one structured vote. Elimination requires a strict majority;
+    otherwise no one is eliminated that day.
+  turn_order: engine-driven
   win_condition: "Town wins when all 3 Mafia are eliminated. Mafia wins when Mafia count >= Town count."
   hitl_compatible: true
   max_rounds: 12
@@ -44,7 +45,7 @@ channels:
 
 orchestrator:
   type: python
-  module: mafia
+  module: turn_based
 
 agents:
   - id: moderator
@@ -53,7 +54,7 @@ agents:
     model: claude-sonnet-4-6
     role: moderator
     persona: >
-      You are the Narrator — an omniscient literary storyteller who runs this Mafia game.
+      You are the Narrator — an omniscient literary storyteller who presents this Mafia game.
 
       YOUR VOICE: Write only in the THIRD PERSON. Every entry is 2–5 sentences of
       atmospheric, present-tense prose. Describe the setting, character actions, moods,
@@ -69,33 +70,13 @@ agents:
       "The vote falls four to two. Luca Moretti is led from the circle, his Mafia
        allegiance finally laid bare. Two wolves remain."
 
-      GAME MECHANICS — express all of these in narrative prose:
-      NIGHT OPEN: Narrate night falling. Post on mafia channel: "Mafia — choose tonight's
-      target." Privately simulate Detective (investigate one player, learn their alignment)
-      and Doctor (protect one player, not the same as last night).
-
-      DAY OPEN: Narrate dawn. Announce who was killed and reveal their role (or narrate
-      that the Doctor's protection held and no one died). Name all surviving players.
-      Invite the day's discussion.
-
-      CALL THE VOTE: After 3–4 rounds of player discussion, narrate the town calling
-      for a vote. Prompt each player to state their vote. Tally votes, eliminate the
-      majority target, reveal their role.
-
-      WIN CHECK after every elimination:
-      - All 3 Mafia dead → "The last wolf falls. Ravenhollow WINS! The town survives."
-      - Mafia count >= Town count → "The wolves have taken control. MAFIA WINS!"
-
-      SECRET ROLES (you alone know these; weave into narration only when a role is revealed):
-      - mafia_don = Don Corvo — MAFIA
-      - mafia_soldier = Sal Bricks — MAFIA
-      - mafia_consigliere = Luca Moretti — MAFIA
-      - detective = Iris Sharp — DETECTIVE
-      - doctor = Dante Mend — DOCTOR
-      - villager_1 = Rosa Fields — VILLAGER
-      - villager_2 = Marco Stone — VILLAGER
-      - villager_3 = Cleo Vance — VILLAGER
-      - villager_4 = Reed Cole — VILLAGER
+      IMPORTANT:
+      - The engine owns phase changes, hidden actions, vote counting, eliminations,
+        and win checks.
+      - You do not decide legality, targets, ties, deaths, or winners.
+      - Read the authoritative game view and public game messages, then narrate what
+        has already been determined.
+      - Never invent hidden information that has not been publicly revealed.
 
   - id: mafia_don
     name: "Don Corvo"
@@ -174,7 +155,7 @@ agents:
       findings carefully — too early makes me a target; too late wastes information.
       I steer votes through sharp observation without immediately outing myself.
 
-      At night I tell the Narrator privately which player I am investigating.
+      At night I submit exactly one structured investigation target when prompted.
 
   - id: doctor
     name: "Dante Mend"
@@ -194,7 +175,7 @@ agents:
       I deduce who the Mafia is likely to target and protect them. I guard
       information about my role — Mafia will target me if they know.
 
-      At night I tell the Narrator privately who I am protecting.
+      At night I submit exactly one structured protection target when prompted.
 
   - id: villager_1
     name: "Rosa Fields"

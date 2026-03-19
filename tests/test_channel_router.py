@@ -441,3 +441,74 @@ class TestSystemPrompt:
         assert "role=presentation_referee" in system
         assert "authoritative_state=" in system
         assert '"B1"' in system
+
+    def test_mafia_action_phase_includes_structured_contract(self):
+        config = SessionConfig.model_validate({
+            "title": "Mafia",
+            "description": "Test",
+            "type": "games",
+            "setting": "game",
+            "topic": "Play Mafia.",
+            "agents": [
+                {"id": "moderator", "name": "Narrator", "provider": "p", "model": "m", "role": "moderator"},
+                {"id": "mafia_don", "name": "Don", "provider": "p", "model": "m", "role": "mafia", "team": "mafia"},
+            ],
+            "channels": [{"id": "mafia", "type": "team", "members": ["mafia_don"]}],
+            "game": GameConfig(plugin="mafia", name="Mafia").model_dump(),
+        })
+        router = ChannelRouter(config)
+        state = _make_state(config)
+        state.game_state.custom["game_type"] = "mafia"
+        state.game_state.custom["authoritative_state"] = {"phase": "night_mafia_vote"}
+        state.game_state.custom["visible_states"] = {
+            "mafia_don": {
+                "viewer_id": "mafia_don",
+                "payload": {
+                    "phase": "night_mafia_vote",
+                    "round_number": 1,
+                    "alive_players": [{"id": "mafia_don", "name": "Don"}],
+                    "current_speaker": "mafia_don",
+                },
+            }
+        }
+        state.game_state.custom["legal_actions"] = {
+            "mafia_don": [{"action_type": "night_mafia_vote", "input_schema": {}}],
+        }
+
+        system = router.build_context("mafia_don", state)[1]["content"]
+        assert 'response_schema={"target": "<agent_id>"}' in system
+        assert "return exactly one json object" in system.lower()
+
+    def test_mafia_discussion_phase_uses_normal_dialogue(self):
+        config = SessionConfig.model_validate({
+            "title": "Mafia",
+            "description": "Test",
+            "type": "games",
+            "setting": "game",
+            "topic": "Play Mafia.",
+            "agents": [
+                {"id": "moderator", "name": "Narrator", "provider": "p", "model": "m", "role": "moderator"},
+                {"id": "villager_1", "name": "Rosa", "provider": "p", "model": "m", "role": "villager"},
+            ],
+            "game": GameConfig(plugin="mafia", name="Mafia").model_dump(),
+        })
+        router = ChannelRouter(config)
+        state = _make_state(config)
+        state.game_state.custom["game_type"] = "mafia"
+        state.game_state.custom["authoritative_state"] = {"phase": "day_discussion"}
+        state.game_state.custom["visible_states"] = {
+            "villager_1": {
+                "viewer_id": "villager_1",
+                "payload": {
+                    "phase": "day_discussion",
+                    "round_number": 1,
+                    "alive_players": [{"id": "villager_1", "name": "Rosa"}],
+                    "current_speaker": "villager_1",
+                },
+            }
+        }
+        state.game_state.custom["legal_actions"] = {"villager_1": []}
+
+        system = router.build_context("villager_1", state)[1]["content"]
+        assert "discussion turn" in system.lower()
+        assert "do not return json" in system.lower()

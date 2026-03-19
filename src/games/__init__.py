@@ -2,6 +2,7 @@
 
 from src.games.battleship import BattleshipGame, BattleshipState
 from src.games.connect_four import ConnectFourGame, ConnectFourState
+from src.games.mafia import MafiaGame, MafiaState
 from src.games.contracts import (
     ActionSpec,
     ApplyResult,
@@ -41,6 +42,8 @@ __all__ = [
     "HybridAuditBackend",
     "HybridAuditRecord",
     "LLMModerationBackend",
+    "MafiaGame",
+    "MafiaState",
     "ModerationBackend",
     "ModerationDecision",
     "ScriptedModerationBackend",

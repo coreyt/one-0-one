@@ -202,28 +202,33 @@ class SessionEngine:
         return state
 
     def _emit_channel_events(self, state: SessionState) -> None:
-        # Always emit the public channel
-        public_event = ChannelCreatedEvent(
-            timestamp=datetime.now(UTC),
-            session_id=self._session_id,
-            channel_id="public",
-            channel_type="public",
-            members=[],
-        )
-        self._emit_event(public_event, state)
-        self._announced_channels.add("public")
-
-        # Emit configured team/private channels
-        for ch in self._config.channels:
+        def announce_channel(
+            channel_id: str,
+            channel_type: str,
+            members: list[str],
+        ) -> None:
+            if channel_id in self._announced_channels:
+                return
             event = ChannelCreatedEvent(
                 timestamp=datetime.now(UTC),
                 session_id=self._session_id,
-                channel_id=ch.id,
-                channel_type=ch.type,
-                members=ch.members,
+                channel_id=channel_id,
+                channel_type=channel_type,
+                members=members,
             )
             self._emit_event(event, state)
-            self._announced_channels.add(ch.id)
+            self._announced_channels.add(channel_id)
+
+        # Always emit the public channel
+        announce_channel("public", "public", [])
+
+        # Emit configured team/private channels
+        for ch in self._config.channels:
+            announce_channel(ch.id, ch.type, ch.members)
+
+        if self._game_runtime is not None:
+            for ch in self._game_runtime.game.initial_channels(self._game_runtime.state):
+                announce_channel(ch.channel_id, ch.channel_type, ch.members)
 
     def _emit_initial_game_state(self, state: SessionState) -> None:
         if self._game_runtime is None:
@@ -533,6 +538,7 @@ class SessionEngine:
             else (result.communication or parsed_communication_segments)
         )
         should_apply_authoritative_action = self._should_apply_authoritative_action(agent_id)
+        should_apply_authoritative_message_turn = self._should_apply_authoritative_message_turn(agent_id)
         structured_action = (
             self._extract_structured_action(result, parsed.public_message)
             if should_apply_authoritative_action
@@ -621,6 +627,14 @@ class SessionEngine:
                 parsed_public_message=parsed.public_message,
                 timestamp=now,
             )
+        elif should_apply_authoritative_message_turn:
+            await self._apply_authoritative_message_turn(
+                agent_id=agent_id,
+                agent_name=agent_config.name,
+                state=state,
+                parsed_public_message=parsed.public_message,
+                timestamp=now,
+            )
         elif self._pending_presentation_agent_id(state) == agent_id:
             self._clear_pending_presentation(state)
 
@@ -688,6 +702,14 @@ class SessionEngine:
                 agent_name=agent_config.name,
                 state=state,
                 parsed_action=self._extract_structured_action(None, text),
+                parsed_public_message=text,
+                timestamp=now,
+            )
+        elif self._should_apply_authoritative_message_turn(agent_id) and channel_id in {"public", agent_config.team or ""}:
+            await self._apply_authoritative_message_turn(
+                agent_id=agent_id,
+                agent_name=agent_config.name,
+                state=state,
                 parsed_public_message=text,
                 timestamp=now,
             )
@@ -864,6 +886,8 @@ class SessionEngine:
         state.game_state.round = authoritative.get("round_number", state.game_state.round)
         state.game_state.winner = authoritative.get("winner")
         state.game_state.is_over = self._game_runtime.is_terminal()
+        if isinstance(authoritative.get("eliminated"), list):
+            state.game_state.eliminated = list(authoritative["eliminated"])
 
     def _pending_presentation_agent_id(self, state: SessionState) -> str | None:
         pending = state.game_state.custom.get("_pending_presentation_agent_id")
@@ -885,7 +909,16 @@ class SessionEngine:
     def _should_apply_authoritative_action(self, agent_id: str) -> bool:
         if self._game_runtime is None:
             return False
-        return agent_id in self._game_runtime.turn_context().active_actor_ids
+        if agent_id not in self._game_runtime.turn_context().active_actor_ids:
+            return False
+        return bool(self._game_runtime.legal_actions(agent_id))
+
+    def _should_apply_authoritative_message_turn(self, agent_id: str) -> bool:
+        if self._game_runtime is None:
+            return False
+        if agent_id not in self._game_runtime.turn_context().active_actor_ids:
+            return False
+        return not self._game_runtime.legal_actions(agent_id)
 
     def _extract_structured_action(
         self,
@@ -997,16 +1030,81 @@ class SessionEngine:
 
         self._game_runtime.state = decision.next_state
         self._reset_moderation_retry_count(state, agent_id)
+        self._commit_authoritative_result(
+            state=state,
+            agent_id=agent_id,
+            agent_name=agent_name,
+            timestamp=timestamp,
+            state_delta=decision.state_delta,
+            public_events=decision.public_events or [],
+            private_events=decision.private_events or [],
+            action_type=(
+                decision.applied_action.action_type
+                if decision.applied_action is not None
+                else action.action_type
+            ),
+        )
+
+    async def _apply_authoritative_message_turn(
+        self,
+        *,
+        agent_id: str,
+        agent_name: str,
+        state: SessionState,
+        parsed_public_message: str,
+        timestamp: datetime,
+    ) -> None:
+        if self._game_runtime is None:
+            return
+        result = self._game_runtime.apply_message_turn(agent_id, parsed_public_message)
+        if result is None:
+            return
+        self._commit_authoritative_result(
+            state=state,
+            agent_id=agent_id,
+            agent_name=agent_name,
+            timestamp=timestamp,
+            state_delta=result.state_delta,
+            public_events=result.public_events,
+            private_events=result.private_events,
+            action_type="message_turn",
+        )
+
+    def _commit_authoritative_result(
+        self,
+        *,
+        state: SessionState,
+        agent_id: str,
+        agent_name: str,
+        timestamp: datetime,
+        state_delta: dict[str, object],
+        public_events: list[dict],
+        private_events: list[dict],
+        action_type: str,
+    ) -> None:
+        if self._game_runtime is None:
+            return
         self._sync_authoritative_game_state(state)
+        self._emit_game_generated_messages(
+            state=state,
+            timestamp=timestamp,
+            turn_number=state.turn_number,
+            public_events=public_events,
+            private_events=private_events,
+        )
         presentation_agent_id = self._presentation_agent_id()
-        if presentation_agent_id is not None and presentation_agent_id != agent_id:
+        if (
+            presentation_agent_id is not None
+            and presentation_agent_id != agent_id
+            and public_events
+        ):
             state.game_state.custom["_pending_presentation_agent_id"] = presentation_agent_id
         gs_event = GameStateEvent(
             timestamp=timestamp,
             turn_number=state.turn_number,
             session_id=self._session_id,
             updates={
-                "authoritative_delta": decision.state_delta,
+                "authoritative_delta": state_delta,
                 "authoritative_state": self._game_runtime.state.model_dump(),
             },
             full_state=state.game_state.model_dump(),
@@ -1015,14 +1113,55 @@ class SessionEngine:
         log.info(
             "game.action_applied",
             agent=agent_name,
-            action_type=(
-                decision.applied_action.action_type
-                if decision.applied_action is not None
-                else action.action_type
-            ),
-            delta=json.dumps(decision.state_delta),
+            action_type=action_type,
+            delta=json.dumps(state_delta),
             turn=state.turn_number,
         )
+
+    def _emit_game_generated_messages(
+        self,
+        *,
+        state: SessionState,
+        timestamp: datetime,
+        turn_number: int,
+        public_events: list[dict],
+        private_events: list[dict],
+    ) -> None:
+        for payload in public_events:
+            text = str(payload.get("text", "")).strip()
+            if not text:
+                continue
+            self._emit_communication_segment(
+                segment=CommunicationSegment(visibility="public", text=text),
+                agent_id="game_engine",
+                agent_name="Game",
+                model="game",
+                turn_number=turn_number,
+                is_parallel=False,
+                timestamp=timestamp,
+                state=state,
+                team_channel_id=None,
+            )
+        for payload in private_events:
+            text = str(payload.get("text", "")).strip()
+            recipient = payload.get("recipient_id") or payload.get("recipient_name")
+            if not text or not isinstance(recipient, str):
+                continue
+            self._emit_communication_segment(
+                segment=CommunicationSegment(
+                    visibility="private",
+                    text=text,
+                    recipient=recipient,
+                ),
+                agent_id="game_engine",
+                agent_name="Game",
+                model="game",
+                turn_number=turn_number,
+                is_parallel=False,
+                timestamp=timestamp,
+                state=state,
+                team_channel_id=None,
+            )
 
     def _resolve_moderation_decision(
         self,
