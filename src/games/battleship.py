@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -31,24 +32,6 @@ _FLEET_ORDER = [
     ("Submarine", 3),
     ("Destroyer", 2),
 ]
-_FIXED_LAYOUTS = [
-    {
-        "Carrier": ["A1", "A2", "A3", "A4", "A5"],
-        "Battleship": ["C1", "C2", "C3", "C4"],
-        "Cruiser": ["E1", "E2", "E3"],
-        "Submarine": ["G1", "G2", "G3"],
-        "Destroyer": ["I1", "I2"],
-    },
-    {
-        "Carrier": ["B1", "B2", "B3", "B4", "B5"],
-        "Battleship": ["D1", "D2", "D3", "D4"],
-        "Cruiser": ["F1", "F2", "F3"],
-        "Submarine": ["H1", "H2", "H3"],
-        "Destroyer": ["J1", "J2"],
-    },
-]
-
-
 class BattleshipState(GameStateBase):
     """Authoritative runtime state for Battleship."""
 
@@ -69,15 +52,20 @@ class BattleshipGame:
 
     game_type = "battleship"
 
+    def __init__(self, rng: random.Random | None = None) -> None:
+        self._rng = rng or random.SystemRandom()
+
     def initial_state(
         self,
         config: "GameConfig",
         agents: list["AgentConfig"],
     ) -> BattleshipState:
         players = [agent.id for agent in agents if agent.role != "moderator"][:2]
+        if len(players) != 2:
+            raise ValueError("Battleship requires exactly two non-moderator players.")
         ship_positions = {
-            player_id: _FIXED_LAYOUTS[index]
-            for index, player_id in enumerate(players)
+            player_id: self._generate_layout()
+            for player_id in players
         }
         return BattleshipState(
             players=players,
@@ -278,3 +266,29 @@ class BattleshipGame:
     @staticmethod
     def _target_player(players: list[str], actor_id: str) -> str:
         return next(player_id for player_id in players if player_id != actor_id)
+
+    def _generate_layout(self) -> dict[str, list[str]]:
+        occupied: set[str] = set()
+        layout: dict[str, list[str]] = {}
+        for ship_name, size in _FLEET_ORDER:
+            while True:
+                orientation = self._rng.choice(("horizontal", "vertical"))
+                if orientation == "horizontal":
+                    start_col = self._rng.randint(0, 10 - size)
+                    row = self._rng.randint(1, 10)
+                    coordinates = [
+                        f"{chr(ord('A') + start_col + offset)}{row}"
+                        for offset in range(size)
+                    ]
+                else:
+                    col = self._rng.randint(0, 9)
+                    start_row = self._rng.randint(1, 11 - size)
+                    coordinates = [
+                        f"{chr(ord('A') + col)}{start_row + offset}"
+                        for offset in range(size)
+                    ]
+                if occupied.isdisjoint(coordinates):
+                    layout[ship_name] = coordinates
+                    occupied.update(coordinates)
+                    break
+        return layout
