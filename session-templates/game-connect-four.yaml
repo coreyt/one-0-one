@@ -66,7 +66,7 @@ agents:
   - id: player_red
     name: "Red"
     provider: openai
-    model: gpt-4o
+    model: gpt-4o-mini
     routing_mode: airlock_routed
     role: player
     monologue: false
@@ -87,7 +87,7 @@ agents:
   - id: player_black
     name: "Black"
     provider: google
-    model: gemini-pro
+    model: gemini-flash
     routing_mode: airlock_routed
     role: player
     monologue: false
