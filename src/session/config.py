@@ -15,13 +15,16 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
 from src.personas import PersonalityProfile
+
+_log = logging.getLogger("one_0_one.config")
 
 
 # ---------------------------------------------------------------------------
@@ -44,6 +47,7 @@ class AgentConfig(BaseModel):
     """Reference a named profile in personas/roster.yaml."""
     personality: PersonalityProfile | None = None
     """Inline personality profile. Takes priority over personality_id if both are set."""
+    airlock_metadata: dict[str, Any] = Field(default_factory=dict)
 
     def requested_model(self, *, use_airlock: bool) -> str:
         if self.routing_mode == "airlock_routed":
@@ -51,6 +55,14 @@ class AgentConfig(BaseModel):
                 raise ValueError(
                     f"Agent {self.id!r} uses airlock_routed mode but no Airlock gateway is configured."
                 )
+            return self.model
+        # pinned mode: strip non-OpenAI provider prefix so Airlock can fuzzy-resolve it
+        if use_airlock and self.provider != "openai":
+            _log.warning(
+                "Agent %r uses pinned/%s but Airlock proxy is active; "
+                "stripping provider prefix so Airlock can fuzzy-resolve %r",
+                self.id, self.provider, self.model,
+            )
             return self.model
         return f"{self.provider}/{self.model}"
 

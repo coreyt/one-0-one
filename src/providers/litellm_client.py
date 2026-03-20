@@ -256,6 +256,7 @@ class LiteLLMClient:
         native_thinking: bool = False,
         thinking_budget_tokens: int = 8000,
         timeout: int = 30,
+        airlock_metadata: dict | None = None,
         **kwargs: Any,
     ) -> CompletionResult:
         """
@@ -290,6 +291,8 @@ class LiteLLMClient:
         )
 
         extra_body: dict[str, Any] = {}
+        if airlock_metadata and self._router_url:
+            extra_body["metadata"] = {"airlock": airlock_metadata}
         if native_thinking:
             supports, detected_provider = _supports_native_thinking(
                 model,

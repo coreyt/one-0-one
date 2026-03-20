@@ -283,3 +283,28 @@ class TestAgentConfig:
         )
         with pytest.raises(ValueError, match="Airlock gateway"):
             a.requested_model(use_airlock=False)
+
+    def test_pinned_non_openai_with_airlock_strips_prefix(self):
+        """pinned + anthropic + Airlock → bare model name for fuzzy resolution."""
+        a = AgentConfig(id="a1", name="Nova", provider="anthropic",
+                        model="claude-sonnet-4-6", role="participant")
+        result = a.requested_model(use_airlock=True)
+        assert result == "claude-sonnet-4-6"
+        assert "/" not in result
+
+    def test_pinned_openai_with_airlock_keeps_prefix(self):
+        """openai pinned + Airlock → keep prefix (OpenAI format works via proxy)."""
+        a = AgentConfig(id="a1", name="Nova", provider="openai",
+                        model="gpt-4o", role="participant")
+        assert a.requested_model(use_airlock=True) == "openai/gpt-4o"
+
+    def test_airlock_metadata_default_empty(self):
+        a = AgentConfig(id="a1", name="Nova", provider="anthropic",
+                        model="claude-sonnet-4-6", role="participant")
+        assert a.airlock_metadata == {}
+
+    def test_airlock_metadata_passes_through(self):
+        a = AgentConfig(id="a1", name="Nova", provider="anthropic",
+                        model="claude-sonnet-4-6", role="participant",
+                        airlock_metadata={"cost_tier": "low"})
+        assert a.airlock_metadata == {"cost_tier": "low"}

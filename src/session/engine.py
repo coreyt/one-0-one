@@ -493,6 +493,7 @@ class SessionEngine:
                 thinking_budget_tokens=llm.thinking_budget,
                 timeout=llm.timeout,
                 provider_hint=agent_config.provider,
+                airlock_metadata=agent_config.airlock_metadata or None,
                 **({"max_tokens": llm.max_tokens} if llm.max_tokens else {}),
             )
         except ProviderError as exc:
@@ -934,6 +935,7 @@ class SessionEngine:
                 "thinking_budget_tokens": llm_defaults.thinking_budget,
                 "timeout": llm_defaults.timeout,
                 "provider_hint": moderator_agent.provider,
+                "airlock_metadata": moderator_agent.airlock_metadata or None,
             }
             if llm_defaults.max_tokens:
                 kwargs["max_tokens"] = llm_defaults.max_tokens

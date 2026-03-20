@@ -152,14 +152,20 @@ class AgentEditModal(ModalScreen[dict | None]):
             )
             yield Label("Model:", classes="field-label")
             yield Input(value=self._agent.get("model", "claude-sonnet-4-6"), id="modal-model")
+            airlock_options = (
+                [("Smart (auto)", "smart")] + [(m, m) for m in self._airlock_models]
+                if self._airlock_models
+                else [("No cached Airlock models", _NO_AIRLOCK_MODEL)]
+            )
+            current_model = self._agent.get("model", "")
+            airlock_default = (
+                current_model
+                if current_model in self._airlock_models or current_model == "smart"
+                else (self._airlock_models[0] if self._airlock_models else _NO_AIRLOCK_MODEL)
+            )
             yield Select(
-                [(model, model) for model in self._airlock_models]
-                or [("No cached Airlock models", _NO_AIRLOCK_MODEL)],
-                value=(
-                    self._agent.get("model", "")
-                    if self._agent.get("model", "") in self._airlock_models
-                    else (self._airlock_models[0] if self._airlock_models else _NO_AIRLOCK_MODEL)
-                ),
+                airlock_options,
+                value=airlock_default,
                 id="modal-airlock-model",
                 allow_blank=True,
             )
@@ -223,7 +229,7 @@ class AgentEditModal(ModalScreen[dict | None]):
         use_airlock_select = (
             routing_mode == "airlock_routed"
             and bool(self._airlock_models)
-            and (not current_model or current_model in self._airlock_models)
+            and (not current_model or current_model in self._airlock_models or current_model == "smart")
         )
         airlock_model.display = use_airlock_select
         model_input.display = not use_airlock_select
@@ -697,15 +703,18 @@ class SetupWizardScreen(Screen):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         btn = event.button.id
         if btn == "btn-add-agent":
+            n = len(self._wizard_agents) + 1
             new_agent = {
-                "id": f"agent_{len(self._wizard_agents) + 1}",
-                "name": f"Agent {len(self._wizard_agents) + 1}",
-                "provider": "anthropic",
-                "routing_mode": "pinned",
-                "model": "claude-sonnet-4-6",
+                "id": f"agent_{n}",
+                "name": f"Agent {n}",
                 "role": "participant",
                 "team": None,
                 "persona": "",
+                **(
+                    {"provider": "openai", "routing_mode": "airlock_routed", "model": "smart"}
+                    if self._airlock_models
+                    else {"provider": "anthropic", "routing_mode": "pinned", "model": "claude-sonnet-4-6"}
+                ),
             }
             self._wizard_agents.append(new_agent)
             self._refresh_agents_table()

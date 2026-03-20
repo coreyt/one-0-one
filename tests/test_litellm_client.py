@@ -52,6 +52,22 @@ class TestLiteLLMClient:
                         assert "AIRLOCK_HOST" not in kwargs["extra_headers"]
                         assert "AIRLOCK_PORT" not in kwargs["extra_headers"]
 
+    async def test_airlock_metadata_injected_into_extra_body(self):
+        """airlock_metadata kwarg → extra_body["metadata"]["airlock"]."""
+        with patch("src.providers.litellm_client.settings.litellm_router_url", "http://localhost:4000"):
+            with patch(
+                "src.providers.litellm_client.litellm.acompletion",
+                AsyncMock(return_value=_mock_litellm_response()),
+            ) as completion_mock:
+                client = LiteLLMClient()
+                await client.complete(
+                    model="gpt-4o",
+                    messages=[{"role": "user", "content": "Hi"}],
+                    airlock_metadata={"cost_tier": "low"},
+                )
+                kwargs = completion_mock.await_args.kwargs
+                assert kwargs["extra_body"]["metadata"]["airlock"] == {"cost_tier": "low"}
+
     async def test_airlock_response_headers_are_captured_in_metadata(self):
         with patch("src.providers.litellm_client.settings.litellm_router_url", "http://localhost:4000"):
             with patch(
