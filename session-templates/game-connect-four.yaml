@@ -47,7 +47,8 @@ agents:
   - id: referee
     name: "Referee"
     provider: anthropic
-    model: claude-sonnet-4-6
+    model: claude-sonnet
+    routing_mode: airlock_routed
     role: moderator
     monologue: false
     persona: >
@@ -66,6 +67,7 @@ agents:
     name: "Red"
     provider: openai
     model: gpt-4o
+    routing_mode: airlock_routed
     role: player
     monologue: false
     persona: >
@@ -84,8 +86,9 @@ agents:
 
   - id: player_black
     name: "Black"
-    provider: gemini
-    model: gemini-2.5-flash
+    provider: google
+    model: gemini-pro
+    routing_mode: airlock_routed
     role: player
     monologue: false
     persona: >

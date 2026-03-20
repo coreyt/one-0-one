@@ -75,7 +75,8 @@ class LLMOrchestrator:
 
         Falls back to basic round-robin if the LLM returns malformed output.
         """
-        model = f"{self._config.provider}/{self._config.model}"
+        client = self._get_client()
+        model = self._config.requested_model(use_airlock=client.uses_router)
         system = self._config.persona or _ORCHESTRATOR_SYSTEM
         state_summary = self._serialize_state(input)
 
@@ -87,11 +88,11 @@ class LLMOrchestrator:
         log.info("orchestrator.llm_decision", model=model, turn=input.state.turn_number)
 
         try:
-            client = self._get_client()
             result = await client.complete(
                 model=model,
                 messages=messages,
                 temperature=0.2,  # low temperature for deterministic decisions
+                provider_hint=self._config.provider,
             )
             return self._parse_response(result.text, input)
         except Exception as exc:

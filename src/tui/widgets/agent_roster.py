@@ -31,7 +31,7 @@ class AgentRoster(Widget):
             color = agent_color(i)
             table.add_row(
                 f"[{color}]{agent.name}[/]",
-                f"{agent.provider}/{agent.model}",
+                agent.display_model,
                 "idle",
                 key=agent.id,
             )

@@ -10,7 +10,7 @@ Usage:
 
     client = LiteLLMClient()
     result = await client.complete(
-        model="anthropic/claude-sonnet-4-6",
+        model="anthropic/claude-sonnet-4-6",  # pinned
         messages=[{"role": "user", "content": "Hello"}],
     )
     print(result.text)
@@ -104,7 +104,9 @@ class ProviderClient(Protocol):
         Send a completion request and return the result.
 
         Args:
-            model: Provider-prefixed model string, e.g. "anthropic/claude-sonnet-4-6"
+            model: Requested model name, either provider-prefixed for pinned mode
+                (e.g. "anthropic/claude-sonnet-4-6") or an Airlock-routed model
+                name (e.g. "gpt-4o")
             messages: OpenAI-format message list [{"role": ..., "content": ...}]
             temperature: Sampling temperature (0.0–1.0)
             **kwargs: Additional provider-specific parameters

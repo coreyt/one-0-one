@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from src.logging import get_logger
+from src.providers.model_catalog import load_cached_airlock_model_ids, refresh_airlock_model_ids
 from src.session.config import SessionConfig, load_session_config
 from src.settings import settings
 from src.web.session_manager import session_manager
@@ -140,6 +141,15 @@ async def delete_template(slug: str) -> None:
     if not path.exists():
         raise HTTPException(404, detail=f"Template '{slug}' not found")
     path.unlink()
+
+
+@router.get("/models", response_model=list[str])
+async def list_models() -> list[str]:
+    cached = load_cached_airlock_model_ids()
+    if cached:
+        asyncio.create_task(asyncio.to_thread(refresh_airlock_model_ids))
+        return cached
+    return await asyncio.to_thread(refresh_airlock_model_ids)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

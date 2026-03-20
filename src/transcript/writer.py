@@ -130,7 +130,7 @@ class TranscriptWriter:
         ]
         for agent in config.agents:
             team = agent.team or "—"
-            lines.append(f"| {agent.name} | {agent.provider}/{agent.model} | {agent.role} | {team} |")
+            lines.append(f"| {agent.name} | {agent.display_model} | {agent.role} | {team} |")
 
         lines.append("")
         lines.append(f"**Topic:** {config.topic}")
@@ -204,6 +204,8 @@ class TranscriptWriter:
                     "name": a.name,
                     "provider": a.provider,
                     "model": a.model,
+                    "routing_mode": a.routing_mode,
+                    "display_model": a.display_model,
                     "role": a.role,
                     "team": a.team,
                 }

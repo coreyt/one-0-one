@@ -79,6 +79,7 @@ log = get_logger(__name__)
 
 # Maximum retries for a rule-violating agent before skipping their turn
 _MAX_VIOLATION_RETRIES = 2
+_PROVIDER_BACKOFF_SCHEDULE_SECONDS = [2, 4, 8, 16, 32, 64, 128]
 
 
 class SessionEngine:
@@ -257,6 +258,7 @@ class SessionEngine:
         _empty_attempts: dict[int, int] = {}
 
         while True:
+            await self._honor_provider_backoff(state)
             # Honour pause — waits here until resume() sets the event
             await self._resume_event.wait()
 
@@ -418,10 +420,14 @@ class SessionEngine:
             # row (all providers down), force advancement to avoid an infinite loop.
             new_events = state.events[events_before:]
             retry_pending = bool(state.game_state.custom.pop("_retry_turn_pending", False))
+            provider_backoff_pending = bool(state.game_state.custom.get("_pending_provider_backoff"))
             produced_output = any(
                 e.type in ("MESSAGE", "MONOLOGUE") for e in new_events
             )
             if retry_pending:
+                _empty_attempts.pop(state.turn_number, None)
+                advance = 0
+            elif provider_backoff_pending:
                 _empty_attempts.pop(state.turn_number, None)
                 advance = 0
             elif produced_output:
@@ -475,16 +481,18 @@ class SessionEngine:
             agent_config.monologue
             and agent_config.monologue_mode == "native"
         )
+        requested_model = agent_config.requested_model(use_airlock=self._provider.uses_router)
 
         llm = self._config.llm_defaults
         try:
             result = await self._provider.complete(
-                model=f"{agent_config.provider}/{agent_config.model}",
+                model=requested_model,
                 messages=messages,
                 temperature=llm.temperature,
                 native_thinking=native_thinking,
                 thinking_budget_tokens=llm.thinking_budget,
                 timeout=llm.timeout,
+                provider_hint=agent_config.provider,
                 **({"max_tokens": llm.max_tokens} if llm.max_tokens else {}),
             )
         except ProviderError as exc:
@@ -493,13 +501,13 @@ class SessionEngine:
             log.error(
                 "llm.error",
                 agent_id=agent_id,
-                model=f"{agent_config.provider}/{agent_config.model}",
+                model=requested_model,
                 error=str(exc),
             )
             state.game_state.incidents.append({
                 "turn": state.turn_number,
                 "agent_id": agent_id,
-                "model": f"{agent_config.provider}/{agent_config.model}",
+                "model": requested_model,
                 "type": incident_type,
             })
             incident_event = IncidentEvent(
@@ -508,17 +516,25 @@ class SessionEngine:
                 session_id=self._session_id,
                 agent_id=agent_id,
                 agent_name=agent_config.name,
-                model=f"{agent_config.provider}/{agent_config.model}",
+                model=requested_model,
                 incident_type=incident_type,
                 detail=str(exc),
             )
             self._emit_event(incident_event, state)
+            self._schedule_provider_backoff(
+                state=state,
+                agent_id=agent_id,
+                agent_name=agent_config.name,
+                incident_type=incident_type,
+                detail=str(exc),
+            )
             if self._pending_presentation_agent_id(state) == agent_id:
                 self._clear_pending_presentation(state)
             agent_state.status = "idle"
             return
 
         agent_state.status = "speaking"
+        self._reset_provider_backoff(agent_id, state)
 
         # Update token usage
         agent_state.token_usage["prompt_tokens"] = (
@@ -797,6 +813,33 @@ class SessionEngine:
             reason=safe_reason,  # type: ignore[arg-type]
         )
 
+    async def _honor_provider_backoff(self, state: SessionState) -> None:
+        pending = state.game_state.custom.get("_pending_provider_backoff")
+        if not isinstance(pending, dict):
+            return
+        delay = pending.get("delay_seconds")
+        if not isinstance(delay, int) or delay <= 0:
+            state.game_state.custom.pop("_pending_provider_backoff", None)
+            return
+        state.game_state.custom.pop("_pending_provider_backoff", None)
+        self._resume_event.clear()
+        state.is_paused = True
+        log.warning(
+            "session.paused_for_provider_backoff",
+            delay_seconds=delay,
+            agent_id=pending.get("agent_id"),
+            session_id=self._session_id,
+        )
+        await asyncio.sleep(delay)
+        state.is_paused = False
+        self._resume_event.set()
+        log.info(
+            "session.resumed_after_provider_backoff",
+            delay_seconds=delay,
+            agent_id=pending.get("agent_id"),
+            session_id=self._session_id,
+        )
+
     def _is_hitl_player_mode(self) -> bool:
         return (
             self._config.hitl.enabled
@@ -804,6 +847,38 @@ class SessionEngine:
             and self._config.hitl.mode == "player"
             and self._config.hitl.participant_agent_id is not None
         )
+
+    @staticmethod
+    def _next_provider_backoff_seconds(attempt: int) -> int:
+        index = min(max(attempt - 1, 0), len(_PROVIDER_BACKOFF_SCHEDULE_SECONDS) - 1)
+        return _PROVIDER_BACKOFF_SCHEDULE_SECONDS[index]
+
+    def _schedule_provider_backoff(
+        self,
+        *,
+        state: SessionState,
+        agent_id: str,
+        agent_name: str,
+        incident_type: str,
+        detail: str,
+    ) -> None:
+        attempts = state.game_state.custom.setdefault("provider_error_counts", {})
+        attempt = int(attempts.get(agent_id, 0)) + 1
+        attempts[agent_id] = attempt
+        delay = self._next_provider_backoff_seconds(attempt)
+        state.game_state.custom["_pending_provider_backoff"] = {
+            "agent_id": agent_id,
+            "agent_name": agent_name,
+            "incident_type": incident_type,
+            "detail": detail,
+            "delay_seconds": delay,
+            "attempt": attempt,
+        }
+
+    @staticmethod
+    def _reset_provider_backoff(agent_id: str, state: SessionState) -> None:
+        attempts = state.game_state.custom.setdefault("provider_error_counts", {})
+        attempts[agent_id] = 0
 
     def _is_human_player_agent(self, agent_id: str) -> bool:
         return self._is_hitl_player_mode() and (
@@ -850,12 +925,15 @@ class SessionEngine:
             )
             messages = build_moderation_messages(request)
             kwargs = {
-                "model": f"{moderator_agent.provider}/{moderator_agent.model}",
+                "model": moderator_agent.requested_model(
+                    use_airlock=self._provider.uses_router
+                ),
                 "messages": messages,
                 "temperature": 0.0,
                 "native_thinking": False,
                 "thinking_budget_tokens": llm_defaults.thinking_budget,
                 "timeout": llm_defaults.timeout,
+                "provider_hint": moderator_agent.provider,
             }
             if llm_defaults.max_tokens:
                 kwargs["max_tokens"] = llm_defaults.max_tokens

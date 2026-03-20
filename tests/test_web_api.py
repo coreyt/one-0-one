@@ -104,6 +104,26 @@ class TestTemplateEndpoints:
         resp = client.get("/api/templates/test-template")
         assert resp.status_code == 404
 
+    def test_list_models_returns_cached_models(self, client):
+        with patch("src.web.api.load_cached_airlock_model_ids", return_value=["gpt-4o"]):
+            with patch("src.web.api.refresh_airlock_model_ids", return_value=["gpt-4o"]):
+                def _capture_task(coro):
+                    coro.close()
+                    return MagicMock()
+
+                with patch("src.web.api.asyncio.create_task", side_effect=_capture_task) as create_task:
+                    resp = client.get("/api/models")
+        assert resp.status_code == 200
+        assert resp.json() == ["gpt-4o"]
+        assert create_task.called
+
+    def test_list_models_refreshes_when_cache_empty(self, client):
+        with patch("src.web.api.load_cached_airlock_model_ids", return_value=[]):
+            with patch("src.web.api.refresh_airlock_model_ids", return_value=["gemini-pro"]):
+                resp = client.get("/api/models")
+        assert resp.status_code == 200
+        assert resp.json() == ["gemini-pro"]
+
 
 class TestSessionEndpoints:
     """Basic session lifecycle — does not actually run LLMs."""

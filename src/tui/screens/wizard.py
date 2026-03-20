@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import yaml
 from pathlib import Path
 
@@ -23,6 +24,10 @@ from textual.widgets import (
     TextArea,
 )
 
+from src.providers.model_catalog import (
+    load_cached_airlock_model_ids,
+    refresh_airlock_model_ids,
+)
 from src.session.config import (
     AgentConfig,
     ChannelConfig,
@@ -57,6 +62,12 @@ _PROVIDERS = [
     ("Gemini", "gemini"),
     ("Mistral", "mistral"),
 ]
+
+_ROUTING_MODES = [
+    ("Pinned Provider Model", "pinned"),
+    ("Airlock Routed", "airlock_routed"),
+]
+_NO_AIRLOCK_MODEL = "__no_airlock_model__"
 
 _ORCHESTRATOR_MODULES = [
     ("Basic", "basic"),
@@ -117,9 +128,10 @@ class AgentEditModal(ModalScreen[dict | None]):
     }
     """
 
-    def __init__(self, agent: dict) -> None:
+    def __init__(self, agent: dict, airlock_models: list[str] | None = None) -> None:
         super().__init__()
         self._agent = agent
+        self._airlock_models = airlock_models or []
 
     def compose(self) -> ComposeResult:
         with Vertical(id="agent-modal-box"):
@@ -132,8 +144,25 @@ class AgentEditModal(ModalScreen[dict | None]):
                 value=self._agent.get("provider", "anthropic"),
                 id="modal-provider",
             )
+            yield Label("Routing Mode:", classes="field-label")
+            yield Select(
+                _ROUTING_MODES,
+                value=self._agent.get("routing_mode", "pinned"),
+                id="modal-routing-mode",
+            )
             yield Label("Model:", classes="field-label")
             yield Input(value=self._agent.get("model", "claude-sonnet-4-6"), id="modal-model")
+            yield Select(
+                [(model, model) for model in self._airlock_models]
+                or [("No cached Airlock models", _NO_AIRLOCK_MODEL)],
+                value=(
+                    self._agent.get("model", "")
+                    if self._agent.get("model", "") in self._airlock_models
+                    else (self._airlock_models[0] if self._airlock_models else _NO_AIRLOCK_MODEL)
+                ),
+                id="modal-airlock-model",
+                allow_blank=True,
+            )
             yield Label("Role:", classes="field-label")
             yield Input(value=self._agent.get("role", "participant"), id="modal-role")
             yield Label("Team:", classes="field-label")
@@ -148,6 +177,7 @@ class AgentEditModal(ModalScreen[dict | None]):
         self.query_one("#modal-persona", TextArea).load_text(
             self._agent.get("persona", "")
         )
+        self._sync_modal_routing_controls()
         self.set_focus(self.query_one("#modal-name", Input))
 
     def action_cancel(self) -> None:
@@ -156,11 +186,17 @@ class AgentEditModal(ModalScreen[dict | None]):
     def action_save(self) -> None:
         name = self.query_one("#modal-name", Input).value.strip() or "Agent"
         agent_id = name.lower().replace(" ", "_")
+        model = self.query_one("#modal-model", Input).value.strip()
+        if self.query_one("#modal-routing-mode", Select).value == "airlock_routed":
+            selected_airlock_model = self.query_one("#modal-airlock-model", Select).value
+            if selected_airlock_model not in {Select.BLANK, None, "", _NO_AIRLOCK_MODEL}:
+                model = str(selected_airlock_model)
         result = {
             "id": agent_id,
             "name": name,
             "provider": self.query_one("#modal-provider", Select).value,
-            "model": self.query_one("#modal-model", Input).value.strip(),
+            "routing_mode": self.query_one("#modal-routing-mode", Select).value,
+            "model": model,
             "role": self.query_one("#modal-role", Input).value.strip() or "participant",
             "team": self.query_one("#modal-team", Input).value.strip() or None,
             "persona": self.query_one("#modal-persona", TextArea).text.strip(),
@@ -172,6 +208,25 @@ class AgentEditModal(ModalScreen[dict | None]):
             self.action_save()
         else:
             self.action_cancel()
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "modal-routing-mode":
+            self._sync_modal_routing_controls()
+
+    def _sync_modal_routing_controls(self) -> None:
+        routing_mode = self.query_one("#modal-routing-mode", Select).value
+        provider = self.query_one("#modal-provider", Select)
+        airlock_model = self.query_one("#modal-airlock-model", Select)
+        model_input = self.query_one("#modal-model", Input)
+        provider.disabled = routing_mode == "airlock_routed"
+        current_model = model_input.value.strip()
+        use_airlock_select = (
+            routing_mode == "airlock_routed"
+            and bool(self._airlock_models)
+            and (not current_model or current_model in self._airlock_models)
+        )
+        airlock_model.display = use_airlock_select
+        model_input.display = not use_airlock_select
 
 
 class SetupWizardScreen(Screen):
@@ -194,6 +249,7 @@ class SetupWizardScreen(Screen):
             else "advanced"
         )
         self._wizard_agents: list[dict] = []
+        self._airlock_models: list[str] = load_cached_airlock_model_ids()
         if config:
             self._wizard_agents = [
                 a.model_dump() for a in config.agents
@@ -238,6 +294,7 @@ class SetupWizardScreen(Screen):
             self._populate_from_config()
         self._apply_setup_level()
         self._refresh_game_summary()
+        self.run_worker(self._refresh_airlock_models_async(), exclusive=False)
 
     def on_tabs_tab_activated(self, event: Tabs.TabActivated) -> None:
         if event.tab is None:
@@ -376,7 +433,7 @@ class SetupWizardScreen(Screen):
         )
         pane.mount(Label("Agent Roster:", classes="field-label"))
         table = DataTable(id="agents-table")
-        table.add_columns("Name", "Provider", "Model", "Role", "Team")
+        table.add_columns("Name", "Route", "Model", "Role", "Team")
         pane.mount(table)
         pane.mount(Horizontal(
             Button("Add Agent", variant="primary", id="btn-add-agent"),
@@ -631,7 +688,7 @@ class SetupWizardScreen(Screen):
         for agent in self._wizard_agents:
             table.add_row(
                 agent.get("name", ""),
-                agent.get("provider", ""),
+                "Airlock" if agent.get("routing_mode") == "airlock_routed" else agent.get("provider", ""),
                 agent.get("model", ""),
                 agent.get("role", ""),
                 agent.get("team", "") or "—",
@@ -644,6 +701,7 @@ class SetupWizardScreen(Screen):
                 "id": f"agent_{len(self._wizard_agents) + 1}",
                 "name": f"Agent {len(self._wizard_agents) + 1}",
                 "provider": "anthropic",
+                "routing_mode": "pinned",
                 "model": "claude-sonnet-4-6",
                 "role": "participant",
                 "team": None,
@@ -669,9 +727,14 @@ class SetupWizardScreen(Screen):
                         self._refresh_agents_table()
                         self._refresh_hitl_participant_options()
 
-                self.app.push_screen(AgentEditModal(agent), on_modal_result)
+                self.app.push_screen(AgentEditModal(agent, self._airlock_models), on_modal_result)
         if btn == "btn-add-agent":
             self._refresh_hitl_participant_options()
+
+    async def _refresh_airlock_models_async(self) -> None:
+        models = await asyncio.to_thread(refresh_airlock_model_ids)
+        if models:
+            self._airlock_models = models
 
     # ------------------------------------------------------------------
     # Populate from existing config
@@ -877,6 +940,7 @@ class SetupWizardScreen(Screen):
                     "id": "agent_1",
                     "name": "Agent 1",
                     "provider": "anthropic",
+                    "routing_mode": "pinned",
                     "model": "claude-sonnet-4-6",
                     "role": "participant",
                 }]

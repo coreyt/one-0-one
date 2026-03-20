@@ -5,11 +5,13 @@ All calls route through the local LiteLLM router (airlock) at
 settings.litellm_router_url. The router handles auth, model routing,
 and rate limiting for all configured providers.
 
-Model string format (LiteLLM convention):
-    "anthropic/claude-sonnet-4-6"
-    "openai/gpt-4o"
-    "google/gemini-2.0-flash"
-    "mistral/mistral-large-latest"
+Model string format:
+    Pinned provider/model:
+        "anthropic/claude-sonnet-4-6"
+        "openai/gpt-4o"
+    Airlock-routed model:
+        "gpt-4o"
+        "gemini-pro"
 
 Native thinking support (monologue_mode="native"):
     Claude extended thinking → extra_body={"thinking": {"type": "enabled", ...}}
@@ -90,14 +92,70 @@ def _resolve_router_url(explicit_url: str | None) -> str:
     return f"http://{host}:{port}/v1"
 
 
-def _supports_native_thinking(model: str) -> tuple[bool, str]:
+def _airlock_env_headers(default_client: str) -> dict[str, str]:
+    """Project AIRLOCK_* environment context into request headers for the gateway."""
+    headers: dict[str, str] = {}
+    env_values = {
+        name: value.strip()
+        for name, value in os.environ.items()
+        if name.startswith("AIRLOCK_") and isinstance(value, str) and value.strip()
+    }
+    if "AIRLOCK_CLIENT" not in env_values and default_client:
+        env_values["AIRLOCK_CLIENT"] = default_client
+
+    excluded = {"AIRLOCK_MASTER_KEY", "AIRLOCK_HOST", "AIRLOCK_PORT"}
+    for name, value in env_values.items():
+        if name in excluded:
+            continue
+        headers[name] = value
+        suffix = name.removeprefix("AIRLOCK_").lower().split("_")
+        canonical = "-".join(part.capitalize() for part in suffix if part)
+        if canonical:
+            headers[f"X-Airlock-{canonical}"] = value
+    return headers
+
+
+def _extract_airlock_response_metadata(response: Any) -> dict[str, Any]:
+    """Capture Airlock-specific response metadata from LiteLLM response headers."""
+    metadata: dict[str, Any] = {}
+    headers = getattr(response, "_response_headers", None) or {}
+    if not isinstance(headers, dict):
+        return metadata
+    normalized_headers = {
+        str(key).lower(): value
+        for key, value in headers.items()
+    }
+
+    interesting = {
+        "x-airlock-model-override": "airlock_model_override",
+        "x-airlock-provider-mode": "airlock_provider_mode",
+        "x-airlock-reasoning-mode": "airlock_reasoning_mode",
+        "x-airlock-provider-state": "airlock_provider_state",
+        "x-airlock-empty-text-success": "airlock_empty_text_success",
+    }
+    for header_name, metadata_key in interesting.items():
+        value = normalized_headers.get(header_name)
+        if value is None:
+            continue
+        metadata[metadata_key] = value
+    return metadata
+
+
+def _supports_native_thinking(
+    model: str,
+    provider_hint: str | None = None,
+) -> tuple[bool, str]:
     """
     Return (supports_thinking, provider) for a model string.
     Model format: "provider/model-name"
     """
-    if "/" not in model:
+    if "/" in model:
+        provider, model_name = model.split("/", 1)
+    else:
+        provider = (provider_hint or "").strip()
+        model_name = model
+    if not provider:
         return False, ""
-    provider, model_name = model.split("/", 1)
     if provider in _NATIVE_THINKING_PROVIDERS:
         if any(model_name.startswith(m) for m in _CLAUDE_THINKING_MODELS):
             return True, provider
@@ -180,10 +238,15 @@ class LiteLLMClient:
         self._router_url = _resolve_router_url(configured_url)
         self._airlock_api_key = os.environ.get("AIRLOCK_MASTER_KEY", "").strip()
         self._airlock_client = os.environ.get("AIRLOCK_CLIENT") or settings.airlock_client
+        self._airlock_headers = _airlock_env_headers(self._airlock_client)
         if self._router_url:
             if self._airlock_client and not os.environ.get("AIRLOCK_CLIENT"):
                 os.environ["AIRLOCK_CLIENT"] = self._airlock_client
             litellm.api_base = self._router_url
+
+    @property
+    def uses_router(self) -> bool:
+        return bool(self._router_url)
 
     async def complete(
         self,
@@ -199,7 +262,8 @@ class LiteLLMClient:
         Send a completion request through the airlock LiteLLM router.
 
         Args:
-            model: Provider-prefixed model string
+            model: Requested model string (provider-prefixed in pinned mode, bare
+                model name in Airlock-routed mode)
             messages: OpenAI-format message list
             temperature: Sampling temperature
             native_thinking: If True and model supports it, enable native thinking
@@ -212,7 +276,8 @@ class LiteLLMClient:
         Raises:
             ProviderError: on any LiteLLM or upstream API failure
         """
-        provider = model.split("/")[0] if "/" in model else "unknown"
+        provider_hint = str(kwargs.pop("provider_hint", "") or "")
+        provider = model.split("/")[0] if "/" in model else (provider_hint or "unknown")
         prompt_tokens_estimate = sum(len(m.get("content", "")) // 4 for m in messages)
 
         log.info(
@@ -226,7 +291,10 @@ class LiteLLMClient:
 
         extra_body: dict[str, Any] = {}
         if native_thinking:
-            supports, detected_provider = _supports_native_thinking(model)
+            supports, detected_provider = _supports_native_thinking(
+                model,
+                provider_hint=provider_hint,
+            )
             if supports and detected_provider in _NATIVE_THINKING_PROVIDERS:
                 extra_body["thinking"] = {
                     "type": "enabled",
@@ -249,10 +317,10 @@ class LiteLLMClient:
                 call_kwargs["api_base"] = self._router_url
                 if self._airlock_api_key:
                     call_kwargs["api_key"] = self._airlock_api_key
-                if self._airlock_client:
+                if self._airlock_headers:
                     call_kwargs["extra_headers"] = {
                         **call_kwargs.get("extra_headers", {}),
-                        "X-Airlock-Client": self._airlock_client,
+                        **self._airlock_headers,
                     }
             response = await litellm.acompletion(**call_kwargs, timeout=timeout)
         except litellm.exceptions.AuthenticationError as exc:
@@ -305,11 +373,16 @@ class LiteLLMClient:
             else []
         )
 
+        metadata = {
+            "native_thinking_requested": native_thinking,
+            **_extract_airlock_response_metadata(response),
+        }
+
         return CompletionResult(
             text=text,
             usage=usage,
             model=actual_model,
             communication=communication,
             monologue=monologue,
-            metadata={"native_thinking_requested": native_thinking},
+            metadata=metadata,
         )

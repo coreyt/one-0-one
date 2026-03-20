@@ -84,12 +84,11 @@ class TemplateDetailPanel(Widget):
 
         # ── Agent roster ──
         log.write("[bold yellow]━━ Agents ━━[/bold yellow]")
-        log.write(f"  {'Name':<18} {'Provider/Model':<30} {'Role':<14} Team")
+        log.write(f"  {'Name':<18} {'Model Route':<30} {'Role':<14} Team")
         log.write(f"  {'─' * 18} {'─' * 30} {'─' * 14} {'─' * 12}")
         for a in cfg.agents:
-            prov_model = f"{a.provider}/{a.model}"
             team = a.team or "—"
-            log.write(f"  {a.name:<18} {prov_model:<30} {a.role:<14} {team}")
+            log.write(f"  {a.name:<18} {a.display_model:<30} {a.role:<14} {team}")
         log.write("")
 
         # ── Channels ──
@@ -107,7 +106,10 @@ class TemplateDetailPanel(Widget):
         else:
             prov = cfg.orchestrator.provider or "—"
             model = cfg.orchestrator.model or "—"
-            log.write(f"  Type: llm  Provider: {prov}  Model: {model}")
+            if cfg.orchestrator.routing_mode == "airlock_routed":
+                log.write(f"  Type: llm  Route: Airlock  Model: {model}")
+            else:
+                log.write(f"  Type: llm  Provider: {prov}  Model: {model}")
         log.write("")
 
         # ── HITL ──

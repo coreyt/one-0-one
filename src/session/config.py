@@ -34,6 +34,7 @@ class AgentConfig(BaseModel):
     name: str
     provider: str
     model: str
+    routing_mode: Literal["pinned", "airlock_routed"] = "pinned"
     role: str
     persona: str = ""
     team: str | None = None
@@ -44,6 +45,21 @@ class AgentConfig(BaseModel):
     personality: PersonalityProfile | None = None
     """Inline personality profile. Takes priority over personality_id if both are set."""
 
+    def requested_model(self, *, use_airlock: bool) -> str:
+        if self.routing_mode == "airlock_routed":
+            if not use_airlock:
+                raise ValueError(
+                    f"Agent {self.id!r} uses airlock_routed mode but no Airlock gateway is configured."
+                )
+            return self.model
+        return f"{self.provider}/{self.model}"
+
+    @property
+    def display_model(self) -> str:
+        if self.routing_mode == "airlock_routed":
+            return f"{self.model} [airlock]"
+        return f"{self.provider}/{self.model}"
+
 
 class OrchestratorConfig(BaseModel):
     type: Literal["python", "llm"] = "python"
@@ -51,6 +67,7 @@ class OrchestratorConfig(BaseModel):
     # for type=llm: provider + model + optional persona
     provider: str | None = None
     model: str | None = None
+    routing_mode: Literal["pinned", "airlock_routed"] = "pinned"
     persona: str = ""
 
     @model_validator(mode="after")
@@ -61,6 +78,19 @@ class OrchestratorConfig(BaseModel):
                     "orchestrator type 'llm' requires 'provider' and 'model'"
                 )
         return self
+
+    def requested_model(self, *, use_airlock: bool) -> str:
+        if not self.model:
+            raise ValueError("orchestrator model is required")
+        if self.routing_mode == "airlock_routed":
+            if not use_airlock:
+                raise ValueError(
+                    "LLM orchestrator uses airlock_routed mode but no Airlock gateway is configured."
+                )
+            return self.model
+        if not self.provider:
+            raise ValueError("orchestrator provider is required for pinned mode")
+        return f"{self.provider}/{self.model}"
 
 
 class ChannelConfig(BaseModel):

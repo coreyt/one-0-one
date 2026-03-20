@@ -7,15 +7,22 @@ import Step from '@mui/material/Step';
 import StepLabel from '@mui/material/StepLabel';
 import Stepper from '@mui/material/Stepper';
 import TextField from '@mui/material/TextField';
+import MenuItem from '@mui/material/MenuItem';
 import ToggleButton from '@mui/material/ToggleButton';
 import ToggleButtonGroup from '@mui/material/ToggleButtonGroup';
 import Typography from '@mui/material/Typography';
+import { useModels } from '../hooks/useModels';
 import { useTemplate, useSaveTemplate } from '../hooks/useTemplates';
 import { useStartSession } from '../hooks/useSessions';
 import type { SessionConfig } from '../types/config';
 
 const STEPS = ['Topic', 'Setting', 'Agents', 'Orchestrator', 'HITL', 'Review'];
 const SETTINGS = ['social', 'research', 'game', 'task', 'problem-solve'];
+const PROVIDERS = ['anthropic', 'openai', 'google', 'gemini', 'mistral'];
+const ROUTING_MODES = [
+  { value: 'pinned', label: 'Pinned Provider Model' },
+  { value: 'airlock_routed', label: 'Airlock Routed' },
+] as const;
 
 const defaultConfig = (): SessionConfig => ({
   title: '',
@@ -29,6 +36,7 @@ const defaultConfig = (): SessionConfig => ({
       name: 'Agent 1',
       provider: 'anthropic',
       model: 'claude-sonnet-4-6',
+      routing_mode: 'pinned',
       role: 'participant',
     },
   ],
@@ -43,6 +51,7 @@ export function WizardPage() {
   const templateSlug = searchParams.get('template');
 
   const { data: existingTemplate } = useTemplate(templateSlug ?? '');
+  const { data: airlockModels = [] } = useModels();
   const saveTemplate = useSaveTemplate();
   const startSession = useStartSession();
 
@@ -124,6 +133,13 @@ export function WizardPage() {
               {config.agents.length} agent(s) configured. Edit agent details below:
             </Typography>
             {config.agents.map((agent, i) => (
+              (() => {
+                const routed = (agent.routing_mode ?? 'pinned') === 'airlock_routed';
+                const modelOptions =
+                  routed && airlockModels.length > 0
+                    ? Array.from(new Set([agent.model, ...airlockModels].filter(Boolean)))
+                    : [];
+                return (
               <Paper key={agent.id} sx={{ p: 2, mb: 1, background: '#1c2128' }}>
                 <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
                   <TextField
@@ -138,19 +154,49 @@ export function WizardPage() {
                     sx={{ width: 120 }}
                   />
                   <TextField
+                    label="Routing"
+                    select
+                    size="small"
+                    value={agent.routing_mode ?? 'pinned'}
+                    onChange={(e) => {
+                      const agents = [...config.agents];
+                      agents[i] = {
+                        ...agent,
+                        routing_mode: e.target.value as 'pinned' | 'airlock_routed',
+                      };
+                      update({ agents });
+                    }}
+                    sx={{ width: 180 }}
+                  >
+                    {ROUTING_MODES.map((mode) => (
+                      <MenuItem key={mode.value} value={mode.value}>
+                        {mode.label}
+                      </MenuItem>
+                    ))}
+                  </TextField>
+                  <TextField
                     label="Provider"
+                    select
                     size="small"
                     value={agent.provider}
+                    disabled={(agent.routing_mode ?? 'pinned') === 'airlock_routed'}
                     onChange={(e) => {
                       const agents = [...config.agents];
                       agents[i] = { ...agent, provider: e.target.value };
                       update({ agents });
                     }}
                     sx={{ width: 120 }}
-                  />
+                  >
+                    {PROVIDERS.map((provider) => (
+                      <MenuItem key={provider} value={provider}>
+                        {provider}
+                      </MenuItem>
+                    ))}
+                  </TextField>
                   <TextField
                     label="Model"
                     size="small"
+                    select={routed && modelOptions.length > 0}
                     value={agent.model}
                     onChange={(e) => {
                       const agents = [...config.agents];
@@ -158,7 +204,15 @@ export function WizardPage() {
                       update({ agents });
                     }}
                     sx={{ width: 180 }}
-                  />
+                  >
+                    {routed && modelOptions.length > 0
+                      ? modelOptions.map((model) => (
+                          <MenuItem key={model} value={model}>
+                            {model}
+                          </MenuItem>
+                        ))
+                      : null}
+                  </TextField>
                   <TextField
                     label="Role"
                     size="small"
@@ -172,6 +226,8 @@ export function WizardPage() {
                   />
                 </Box>
               </Paper>
+                );
+              })()
             ))}
           </Box>
         );

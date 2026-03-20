@@ -247,7 +247,9 @@ class TestAgentConfig:
         )
         assert not a.monologue
         assert a.monologue_mode == "prompt"
+        assert a.routing_mode == "pinned"
         assert a.team is None
+        assert a.requested_model(use_airlock=False) == "anthropic/claude-sonnet-4-6"
 
     def test_monologue_native(self):
         a = AgentConfig(
@@ -257,3 +259,27 @@ class TestAgentConfig:
         )
         assert a.monologue
         assert a.monologue_mode == "native"
+
+    def test_airlock_routed_agent_uses_bare_model_with_gateway(self):
+        a = AgentConfig(
+            id="a1",
+            name="Nova",
+            provider="openai",
+            model="gpt-4o",
+            routing_mode="airlock_routed",
+            role="participant",
+        )
+        assert a.requested_model(use_airlock=True) == "gpt-4o"
+        assert a.display_model == "gpt-4o [airlock]"
+
+    def test_airlock_routed_agent_requires_gateway(self):
+        a = AgentConfig(
+            id="a1",
+            name="Nova",
+            provider="openai",
+            model="gpt-4o",
+            routing_mode="airlock_routed",
+            role="participant",
+        )
+        with pytest.raises(ValueError, match="Airlock gateway"):
+            a.requested_model(use_airlock=False)

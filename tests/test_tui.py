@@ -903,6 +903,8 @@ transcript:
         config = _make_live_chat_config(max_turns=4)
         config.game.plugin = "connect_four"  # type: ignore[union-attr]
         config.game.description = "Structured Connect Four."  # type: ignore[union-attr]
+        config.agents[1].routing_mode = "airlock_routed"
+        config.agents[1].model = "gpt-4o"
 
         app = TestApp(SetupWizardScreen(config))
         async with app.run_test(headless=True, size=(100, 30)) as pilot:
@@ -916,6 +918,8 @@ transcript:
         assert built.game.moderation.mode == "llm_moderated"
         assert built.game.moderation.moderator_agent_id == "referee"
         assert built.game.description == "Structured Connect Four."
+        assert built.agents[1].routing_mode == "airlock_routed"
+        assert built.agents[1].model == "gpt-4o"
 
     async def test_agent_edit_modal_supports_escape_cancel_and_ctrl_s_save(self):
         from src.tui.screens.wizard import AgentEditModal, SetupWizardScreen
@@ -951,12 +955,48 @@ transcript:
 
             modal = app.screen
             modal.query_one("#modal-name", Input).value = "Judge"
+            modal.query_one("#modal-routing-mode", Select).value = "airlock_routed"
             await pilot.press("ctrl+s")
             await pilot.pause()
 
             assert isinstance(app.screen, SetupWizardScreen)
             assert wizard._wizard_agents[0]["name"] == "Judge"
             assert wizard._wizard_agents[0]["id"] == "judge"
+            assert wizard._wizard_agents[0]["routing_mode"] == "airlock_routed"
+
+    async def test_agent_edit_modal_uses_cached_airlock_models_for_routed_mode(self):
+        from src.tui.screens.wizard import AgentEditModal, SetupWizardScreen
+
+        class TestApp(App):
+            def __init__(self, screen):
+                super().__init__()
+                self._screen = screen
+
+            def on_mount(self) -> None:
+                self.push_screen(self._screen)
+
+        config = _make_live_chat_config(max_turns=4)
+        with patch("src.tui.screens.wizard.load_cached_airlock_model_ids", return_value=["gpt-4o", "gemini-pro"]):
+            with patch("src.tui.screens.wizard.refresh_airlock_model_ids", return_value=["gpt-4o", "gemini-pro"]):
+                app = TestApp(SetupWizardScreen(config))
+
+                async with app.run_test(headless=True, size=(100, 30)) as pilot:
+                    await pilot.pause()
+                    await pilot.pause()
+
+                    wizard = app.screen
+                    table = wizard.query_one("#agents-table", DataTable)
+                    table.move_cursor(row=1, column=0)
+                    wizard.query_one("#btn-edit-agent", Button).press()
+                    await pilot.pause()
+                    assert isinstance(app.screen, AgentEditModal)
+
+                    modal = app.screen
+                    modal.query_one("#modal-routing-mode", Select).value = "airlock_routed"
+                    await pilot.pause()
+
+                    airlock_select = modal.query_one("#modal-airlock-model", Select)
+                    assert airlock_select.display is True
 
     async def test_game_wizard_defaults_to_basic_level_with_progressive_tabs(self, tmp_path):
         from src.tui.app import OneOhOneApp
@@ -1237,26 +1277,42 @@ class TestLiveChatScreen:
 
     async def test_live_chat_runs_battleship_and_renders_terminal_state(self):
         from src.tui.screens.live_chat import LiveChatScreen
+        from src.session.config import GameConfig, SessionConfig
 
-        responses = [
-            "B1", "A10",
-            "B2", "A9",
-            "B3", "A8",
-            "B4", "A7",
-            "B5", "A6",
-            "D1", "J10",
-            "D2", "J9",
-            "D3", "J8",
-            "D4", "J7",
-            "F1", "J6",
-            "F2", "I10",
-            "F3", "I9",
-            "H1", "I8",
-            "H2", "I7",
-            "H3", "I6",
-            "J1", "H10",
-            "J2",
+        seed = SessionConfig(
+            title="Seed",
+            description="Seed",
+            type="games",
+            setting="game",
+            topic="Play Battleship.",
+            agents=[
+                AgentConfig(id="captain_alpha", name="Commander Hayes", provider="openai", model="m", role="player"),
+                AgentConfig(id="captain_beta", name="Captain Voss", provider="google", model="m", role="player"),
+            ],
+            game=GameConfig(plugin="battleship", name="Battleship"),
+        )
+        runtime = GameRuntime.from_session_config(seed)
+        beta_targets = [
+            coordinate
+            for _, coordinates in runtime.state.ship_positions["captain_beta"].items()
+            for coordinate in coordinates
         ]
+        alpha_occupied = {
+            coordinate
+            for _, coordinates in runtime.state.ship_positions["captain_alpha"].items()
+            for coordinate in coordinates
+        }
+        beta_misses = [
+            f"{column}{row}"
+            for column in "ABCDEFGHIJ"
+            for row in range(1, 11)
+            if f"{column}{row}" not in alpha_occupied
+        ]
+        responses: list[str] = []
+        for index, beta_target in enumerate(beta_targets):
+            responses.append(beta_target)
+            if index < len(beta_targets) - 1:
+                responses.append(beta_misses[index])
         completions = [
             CompletionResult(
                 text=text,
@@ -1266,18 +1322,19 @@ class TestLiveChatScreen:
             for text in responses
         ]
 
-        with patch("src.session.engine.LiteLLMClient") as MockClient:
-            MockClient.return_value.complete = AsyncMock(side_effect=completions)
-            app = LiveChatTestApp(LiveChatScreen(_make_live_chat_battleship_config()))
-            async with app.run_test(headless=True, size=(120, 40)) as pilot:
-                for _ in range(24):
-                    await pilot.pause()
+        with patch("src.session.engine.GameRuntime.from_session_config", return_value=runtime):
+            with patch("src.session.engine.LiteLLMClient") as MockClient:
+                MockClient.return_value.complete = AsyncMock(side_effect=completions)
+                app = LiveChatTestApp(LiveChatScreen(_make_live_chat_battleship_config()))
+                async with app.run_test(headless=True, size=(120, 40)) as pilot:
+                    for _ in range(24):
+                        await pilot.pause()
 
-                screen = app.screen
-                logs = screen.query("RichLog")
-                line_count = sum(len(log.lines) for log in logs)
-                turn_label = screen.query_one("#turn-label", Label)
+                    screen = app.screen
+                    logs = screen.query("RichLog")
+                    line_count = sum(len(log.lines) for log in logs)
+                    turn_label = screen.query_one("#turn-label", Label)
 
-                assert line_count > 0
-                assert "ended" in str(turn_label.render()).lower()
-                assert any("Session ended" in message for message, _ in app.notifications)
+                    assert line_count > 0
+                    assert "ended" in str(turn_label.render()).lower()
+                    assert any("Session ended" in message for message, _ in app.notifications)

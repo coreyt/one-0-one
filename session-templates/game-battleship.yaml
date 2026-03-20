@@ -1,7 +1,7 @@
 title: "Battleship"
 description: "Two naval commanders hunt each other's hidden fleets on a 10×10 grid. Call your shots, track your hits, and sink every enemy ship to claim victory."
 type: games
-topic: "Play a game of Battleship. The Admiral places both fleets secretly, then commanders alternate firing shots."
+topic: "Play a game of Battleship. The engine secretly places both fleets, then commanders alternate firing shots."
 
 setting: game
 max_turns: 160
@@ -21,9 +21,10 @@ game:
   rules:
     - "Each player has a 10×10 grid (columns A–J, rows 1–10)."
     - "Fleet: Carrier (5), Battleship (4), Cruiser (3), Submarine (3), Destroyer (2). Total: 17 cells."
-    - "The Admiral secretly places both fleets at game start. Players do not know where enemy ships are."
-    - "Players alternate calling one shot per turn in grid notation: e.g. 'B5' or 'fire at G9'."
-    - "The Admiral announces HIT or MISS and names the ship if it is sunk."
+    - "The engine secretly places both fleets at game start. Players do not know where enemy ships are."
+    - "Players alternate firing one shot per turn."
+    - "Player responses must follow the exact JSON move contract shown in the prompt."
+    - "The Admiral narrates the engine-determined hit, miss, and sunk-ship result."
     - "First player to sink all five enemy ships wins."
     - "Alpha fires first."
   how_to_play: >
@@ -32,7 +33,7 @@ game:
     JSON object in the form {"coordinate": "B5"}. Do not add prose, code fences, or extra text.
     The Admiral narrates the engine-determined result after each shot and may show attack
     tracking grids, but does not validate moves or decide winners independently.
-  turn_order: moderator-driven
+  turn_order: engine-driven
   win_condition: "First to sink all five enemy ships wins."
   max_rounds: 100
 
@@ -49,7 +50,8 @@ agents:
   - id: admiral
     name: "The Admiral"
     provider: anthropic
-    model: claude-sonnet-4-6
+    model: claude-sonnet
+    routing_mode: airlock_routed
     role: moderator
     persona: >
       You are the Admiral — the presentation referee of this Battleship duel.
@@ -76,15 +78,13 @@ agents:
       4. If the engine says the game is over, announce the winner plainly.
       5. Never reveal hidden ship coordinates that have not been observed in play unless the game is already over.
 
-      OPENING: Set the scene dramatically (fog of war, steel decks, etc.).
-      Announce that both fleets are deployed and sealed. Invite Alpha to fire the opening salvo.
-
       Keep narration to 2–4 sentences of atmospheric colour around the grids.
 
   - id: captain_alpha
     name: "Commander Hayes"
     provider: openai
     model: gpt-4o
+    routing_mode: airlock_routed
     role: player
     monologue: true
     monologue_mode: prompt
@@ -110,8 +110,9 @@ agents:
 
   - id: captain_beta
     name: "Captain Voss"
-    provider: gemini
-    model: gemini-2.5-flash
+    provider: google
+    model: gemini-pro
+    routing_mode: airlock_routed
     role: player
     monologue: true
     monologue_mode: prompt

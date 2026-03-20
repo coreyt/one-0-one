@@ -734,6 +734,13 @@ class TestMessageRouting:
                 await engine.run()
 
         assert len(captured_messages) >= 1
+        system_contents = [
+            message["content"]
+            for message in captured_messages[0]
+            if message.get("role") == "system"
+        ]
+        assert any(content.startswith("[Authoritative game view]") for content in system_contents)
+        assert not any(content.startswith("[Game state update]") for content in system_contents)
         combined = "\n".join(m["content"] for m in captured_messages[0] if "content" in m)
         assert "active_player" in combined
         assert "player_red" in combined
@@ -758,13 +765,30 @@ class TestMessageRouting:
                 await engine.run()
 
         assert len(captured_messages) >= 1
-        system_contents = [
-            message["content"]
-            for message in captured_messages[0]
-            if message.get("role") == "system"
-        ]
-        assert any(content.startswith("[Authoritative game view]") for content in system_contents)
-        assert not any(content.startswith("[Game state update]") for content in system_contents)
+
+    async def test_airlock_routed_agent_uses_bare_model_name(self):
+        config = _make_connect_four_config(max_turns=1)
+        config.agents[1].routing_mode = "airlock_routed"
+        config.agents[1].model = "gpt-4o"
+        bus = EventBus()
+        captured_models: list[str] = []
+
+        async def capture_complete(**kwargs):
+            captured_models.append(kwargs["model"])
+            if kwargs["model"] == "gpt-4o":
+                return _make_structured_result(4)
+            return _make_result("Red opens in column 4.")
+
+        with patch("src.session.engine.LiteLLMClient") as MockClient:
+            MockClient.return_value.complete = AsyncMock(side_effect=capture_complete)
+            MockClient.return_value.uses_router = True
+            with patch("src.session.engine.TranscriptWriter") as MockWriter:
+                MockWriter.return_value.record = MagicMock()
+                MockWriter.return_value.flush = AsyncMock()
+                engine = SessionEngine(config, bus)
+                await engine.run()
+
+        assert "gpt-4o" in captured_models
 
     async def test_plugin_game_without_moderator_applies_moves_and_can_end(self):
         config = _make_connect_four_player_only_config(max_turns=20)
@@ -1568,28 +1592,35 @@ class TestHITLInject:
 
 class TestProviderErrors:
     async def test_provider_error_does_not_crash_session(self):
-        """A ProviderError on all agents triggers forced advancement and session ends."""
+        """A ProviderError pauses with backoff, retries, and still allows the session to recover."""
         from src.providers import ProviderError
 
-        # max_turns=1: session ends once turn_number reaches 1.
-        # All LLM calls fail, so the engine retries up to _MAX_EMPTY_ATTEMPTS (3)
-        # times before force-advancing the turn counter to prevent an infinite loop.
-        config = _make_config(max_turns=1)
+        config = _make_config(
+            max_turns=1,
+            agents=[{"id": "a", "name": "Alice", "provider": "anthropic",
+                     "model": "claude-sonnet-4-6", "role": "participant"}],
+        )
         bus = EventBus()
         events = _setup_event_capture(bus)
 
         with patch("src.session.engine.LiteLLMClient") as MockClient:
             MockClient.return_value.complete = AsyncMock(
-                side_effect=ProviderError("API down", provider="test", model="test/model")
+                side_effect=[
+                    ProviderError("API down", provider="test", model="test/model"),
+                    _make_result("Recovered."),
+                ]
             )
-            with patch("src.session.engine.TranscriptWriter") as MockWriter:
-                MockWriter.return_value.record = MagicMock()
-                MockWriter.return_value.flush = AsyncMock()
-                engine = SessionEngine(config, bus)
-                state = await engine.run()  # must not raise
+            with patch("src.session.engine.asyncio.sleep", AsyncMock()) as sleep_mock:
+                with patch("src.session.engine.TranscriptWriter") as MockWriter:
+                    MockWriter.return_value.record = MagicMock()
+                    MockWriter.return_value.flush = AsyncMock()
+                    engine = SessionEngine(config, bus)
+                    state = await engine.run()  # must not raise
 
         end_events = [e for e in events if e.type == "SESSION_END"]
         assert len(end_events) == 1
+        assert sleep_mock.await_args_list[0].args == (2,)
+        assert state.game_state.custom["provider_error_counts"]["a"] == 0
 
     async def test_provider_errors_recorded_as_incidents(self):
         """Each ProviderError is recorded in game_state.incidents."""
@@ -1620,6 +1651,34 @@ class TestProviderErrors:
         assert "model" in inc
         assert "turn" in inc
 
+    async def test_consecutive_provider_errors_use_exponential_backoff(self):
+        from src.providers import ProviderError
+
+        config = _make_config(
+            max_turns=1,
+            agents=[{"id": "a", "name": "Alice", "provider": "anthropic",
+                     "model": "claude-sonnet-4-6", "role": "participant"}],
+        )
+        bus = EventBus()
+
+        with patch("src.session.engine.LiteLLMClient") as MockClient:
+            MockClient.return_value.complete = AsyncMock(
+                side_effect=[
+                    ProviderError("Down 1", provider="test", model="test/model"),
+                    ProviderError("Down 2", provider="test", model="test/model"),
+                    _make_result("ok"),
+                ]
+            )
+            with patch("src.session.engine.asyncio.sleep", AsyncMock()) as sleep_mock:
+                with patch("src.session.engine.TranscriptWriter") as MockWriter:
+                    MockWriter.return_value.record = MagicMock()
+                    MockWriter.return_value.flush = AsyncMock()
+                    engine = SessionEngine(config, bus)
+                    await engine.run()
+
+        delays = [call.args[0] for call in sleep_mock.await_args_list]
+        assert delays[:2] == [2, 4]
+
     async def test_timeout_turn_does_not_consume_turn_budget(self):
         """A timeout on a single-agent turn should not increment turn_number."""
         from src.providers import ProviderError
@@ -1644,17 +1703,17 @@ class TestProviderErrors:
                     _make_result("msg 3"),
                 ]
             )
-            with patch("src.session.engine.TranscriptWriter") as MockWriter:
-                MockWriter.return_value.record = MagicMock()
-                MockWriter.return_value.flush = AsyncMock()
-                engine = SessionEngine(config, bus)
-                state = await engine.run()
+            with patch("src.session.engine.asyncio.sleep", AsyncMock()) as sleep_mock:
+                with patch("src.session.engine.TranscriptWriter") as MockWriter:
+                    MockWriter.return_value.record = MagicMock()
+                    MockWriter.return_value.flush = AsyncMock()
+                    engine = SessionEngine(config, bus)
+                    state = await engine.run()
 
         public_msgs = [e for e in events if e.type == "MESSAGE" and e.channel_id == "public"]
-        # Without the fix this would be 2 (timeout burns one turn).
-        # With the fix: turn 0 is retried after timeout → 3 successful turns = 3 messages.
         assert len(public_msgs) == 3
         assert len(state.game_state.incidents) == 1
+        assert sleep_mock.await_args_list[0].args == (2,)
 
     async def test_incident_event_emitted_on_provider_error(self):
         """IncidentEvent is emitted to the bus when a provider call fails."""
@@ -1676,11 +1735,12 @@ class TestProviderErrors:
                     _make_result("world"),
                 ]
             )
-            with patch("src.session.engine.TranscriptWriter") as MockWriter:
-                MockWriter.return_value.record = MagicMock()
-                MockWriter.return_value.flush = AsyncMock()
-                engine = SessionEngine(config, bus)
-                await engine.run()
+            with patch("src.session.engine.asyncio.sleep", AsyncMock()):
+                with patch("src.session.engine.TranscriptWriter") as MockWriter:
+                    MockWriter.return_value.record = MagicMock()
+                    MockWriter.return_value.flush = AsyncMock()
+                    engine = SessionEngine(config, bus)
+                    await engine.run()
 
         incident_events = [e for e in events if e.type == "INCIDENT"]
         assert len(incident_events) == 1

@@ -13,7 +13,8 @@ agents:
   - id: optimist
     name: "Nova"
     provider: anthropic
-    model: claude-sonnet-4-6
+    model: claude-sonnet
+    routing_mode: airlock_routed
     role: participant
     persona: "An enthusiastic optimist who believes AI will create more jobs than it destroys and unlock human potential."
 
@@ -21,13 +22,15 @@ agents:
     name: "Rex"
     provider: openai
     model: gpt-4o
+    routing_mode: airlock_routed
     role: participant
     persona: "A grounded skeptic who questions optimistic narratives and focuses on near-term disruption and inequality."
 
   - id: pragmatist
     name: "Sage"
     provider: google
-    model: gemini-2.0-flash
+    model: gemini-flash
+    routing_mode: airlock_routed
     role: participant
     persona: "A pragmatist who looks for historical precedent, nuance, and policy-based solutions."
 

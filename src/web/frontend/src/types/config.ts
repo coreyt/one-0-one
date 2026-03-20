@@ -5,6 +5,7 @@ export interface AgentConfig {
   name: string;
   provider: string;
   model: string;
+  routing_mode?: 'pinned' | 'airlock_routed';
   role: string;
   persona?: string;
   team?: string;
@@ -17,6 +18,7 @@ export interface OrchestratorConfig {
   module?: string;
   provider?: string;
   model?: string;
+  routing_mode?: 'pinned' | 'airlock_routed';
   persona?: string;
 }
 
