@@ -51,7 +51,7 @@ agents:
   - id: moderator
     name: "The Narrator"
     provider: anthropic
-    model: claude-sonnet-4-6
+    model: claude-haiku-4-5-20251001
     role: moderator
     persona: >
       You are the Narrator — an omniscient literary storyteller who presents this Mafia game.
@@ -81,7 +81,7 @@ agents:
   - id: mafia_don
     name: "Don Corvo"
     provider: openai
-    model: gpt-4o
+    model: gpt-4o-mini
     role: mafia
     team: mafia
     personality_id: the_bold_strategist
@@ -121,7 +121,7 @@ agents:
   - id: mafia_consigliere
     name: "Luca Moretti"
     provider: anthropic
-    model: claude-sonnet-4-6
+    model: claude-haiku-4-5-20251001
     role: mafia
     team: mafia
     personality_id: the_charming_opportunist
@@ -141,7 +141,7 @@ agents:
   - id: detective
     name: "Iris Sharp"
     provider: anthropic
-    model: claude-sonnet-4-6
+    model: claude-haiku-4-5-20251001
     role: detective
     personality_id: the_dry_wit_skeptic
     persona: >
@@ -160,7 +160,7 @@ agents:
   - id: doctor
     name: "Dante Mend"
     provider: openai
-    model: gpt-4o
+    model: gpt-4o-mini
     role: doctor
     personality_id: the_gentle_philosopher
     persona: >
@@ -196,7 +196,7 @@ agents:
   - id: villager_2
     name: "Marco Stone"
     provider: anthropic
-    model: claude-sonnet-4-6
+    model: claude-haiku-4-5-20251001
     role: villager
     personality_id: the_stoic_realist
     persona: >
@@ -212,7 +212,7 @@ agents:
   - id: villager_3
     name: "Cleo Vance"
     provider: openai
-    model: gpt-4o
+    model: gpt-4o-mini
     role: villager
     personality_id: the_curious_wanderer
     persona: >

@@ -208,20 +208,27 @@ class ChannelRouter:
         )
         if is_engine_auth and agent.role != "moderator":
             # Players: journal only — no full chat history needed.
-            # Rule violation events targeting this agent must still reach them
-            # so the agent can correct its response on the retry turn.
-            violation_count = 0
+            # Two event types must still reach the player even in journal-only mode:
+            #   RULE_VIOLATION — so the agent can correct its response on retry
+            #   private MESSAGE — so private game events (e.g. detective investigation
+            #     results) reach the intended recipient
+            injected_count = 0
             for event in state.events:
+                visible = False
                 if event.type == "RULE_VIOLATION" and event.agent_id == agent_id:
+                    visible = True
+                elif event.type == "MESSAGE" and event.recipient_id == agent_id:
+                    visible = True
+                if visible:
                     msg = self._event_to_message(event, agent_id)
                     if msg is not None:
                         messages.append(msg)
-                        violation_count += 1
+                        injected_count += 1
             log.debug(
                 "channel.context_built",
                 agent_id=agent_id,
                 total_events=len(state.events),
-                visible_events=violation_count,
+                visible_events=injected_count,
                 mode="journal_only",
             )
             return messages
