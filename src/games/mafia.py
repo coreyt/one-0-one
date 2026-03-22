@@ -402,6 +402,82 @@ class MafiaGame:
     def parse_action_text(self, text: str) -> GameAction | None:
         return None
 
+    def handle_actor_forfeit(self, state: MafiaState, actor_id: str) -> ApplyResult | None:
+        """Skip the actor's current turn gracefully without ending the session.
+
+        Called by the engine when an actor's moderation retries are exhausted.
+        For multiplayer Mafia, a single player's forfeit should not end the game —
+        their turn is simply skipped.
+        """
+        if self.is_terminal(state) or actor_id != self._current_actor(state):
+            return None
+
+        phase = state.phase
+
+        if phase == "night_mafia_discussion":
+            next_state = state.model_copy(deep=True)
+            next_state.turn_index += 1
+            next_state.discussion_index += 1
+            if next_state.discussion_index >= len(next_state.discussion_order):
+                next_state.phase = "night_mafia_vote"
+                next_state.current_vote_order = self._living_mafia(next_state)
+                next_state.vote_index = 0
+            return ApplyResult(next_state=next_state, state_delta={"phase": next_state.phase})
+
+        if phase == "night_mafia_vote":
+            next_state = state.model_copy(deep=True)
+            next_state.turn_index += 1
+            next_state.vote_index += 1
+            if next_state.vote_index < len(next_state.current_vote_order):
+                return ApplyResult(next_state=next_state, state_delta={"vote_index": next_state.vote_index})
+            # All mafia voted or forfeited — resolve
+            if next_state.night_mafia_votes:
+                next_state.night_kill_target = self._resolve_mafia_target(next_state)
+            if next_state.detective_id in next_state.alive_players:
+                next_state.phase = "night_detective"
+                next_state.current_vote_order = [next_state.detective_id]
+                next_state.vote_index = 0
+                return ApplyResult(next_state=next_state, state_delta={"phase": next_state.phase})
+            if next_state.doctor_id in next_state.alive_players:
+                next_state.phase = "night_doctor"
+                next_state.current_vote_order = [next_state.doctor_id]
+                next_state.vote_index = 0
+                return ApplyResult(next_state=next_state, state_delta={"phase": next_state.phase})
+            return self._resolve_night(next_state)
+
+        if phase == "night_detective":
+            next_state = state.model_copy(deep=True)
+            next_state.turn_index += 1
+            if next_state.doctor_id in next_state.alive_players:
+                next_state.phase = "night_doctor"
+                next_state.current_vote_order = [next_state.doctor_id]
+                next_state.vote_index = 0
+                return ApplyResult(next_state=next_state, state_delta={"phase": next_state.phase})
+            return self._resolve_night(next_state)
+
+        if phase == "night_doctor":
+            next_state = state.model_copy(deep=True)
+            next_state.turn_index += 1
+            return self._resolve_night(next_state)
+
+        if phase == "day_discussion":
+            next_state = state.model_copy(deep=True)
+            next_state.turn_index += 1
+            next_state.discussion_index += 1
+            if next_state.discussion_index >= len(next_state.discussion_order):
+                next_state.phase = "day_vote"
+                next_state.current_vote_order = list(next_state.alive_players)
+                next_state.vote_index = 0
+            return ApplyResult(next_state=next_state, state_delta={"phase": next_state.phase})
+
+        if phase == "day_vote":
+            # Delegate to normal day vote path with a null (abstain) vote
+            return self._apply_day_vote(
+                state, actor_id, GameAction(action_type="day_vote", payload={"vote_for": None})
+            )
+
+        return None
+
     def _apply_mafia_vote(
         self,
         state: MafiaState,

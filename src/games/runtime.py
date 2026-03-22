@@ -156,6 +156,16 @@ class GameRuntime:
             self.state, viewer_id, role, config=game_config
         )
 
+    def handle_actor_forfeit(self, actor_id: str) -> "ApplyResult | None":
+        """Delegate actor-forfeit handling to the game plugin if it supports it."""
+        if not hasattr(self.game, "handle_actor_forfeit"):
+            return None
+        result = self.game.handle_actor_forfeit(self.state, actor_id)
+        if result is not None:
+            self.state = result.next_state
+            self._sync_moderation_state()
+        return result
+
     def is_terminal(self) -> bool:
         self._sync_moderation_state()
         return self.game.is_terminal(self.state)

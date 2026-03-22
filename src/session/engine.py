@@ -1516,6 +1516,47 @@ class SessionEngine:
         reason: str,
         failure_category: str,
     ) -> None:
+        # For games with a custom forfeit handler, skip the turn gracefully
+        # rather than ending the session (appropriate for multiplayer games).
+        if self._game_runtime is not None:
+            forfeit_result = self._game_runtime.handle_actor_forfeit(agent_id)
+            if forfeit_result is not None:
+                self._sync_authoritative_game_state(state)
+                if self._game_runtime.is_terminal():
+                    resolution = self._record_moderation_resolution(
+                        state=state,
+                        timestamp=timestamp,
+                        updates={
+                            "policy_action": "forfeit",
+                            "agent_id": agent_id,
+                            "agent_name": agent_name,
+                            "failure_category": failure_category,
+                            "reason": reason,
+                            "winner": state.game_state.winner,
+                        },
+                    )
+                    end_event = self._make_end_event(state, "win_condition")
+                    end_event.message = (
+                        f"{agent_name} forfeited; game reached terminal state."
+                    )
+                    self._emit_event(end_event, state)
+                    state.end_reason = end_event.reason
+                    resolution["end_reason"] = end_event.reason
+                else:
+                    self._record_moderation_resolution(
+                        state=state,
+                        timestamp=timestamp,
+                        updates={
+                            "policy_action": "skip_turn",
+                            "agent_id": agent_id,
+                            "agent_name": agent_name,
+                            "failure_category": failure_category,
+                            "reason": reason,
+                        },
+                    )
+                return
+
+        # Generic forfeit (for 2-player games or games without a forfeit handler).
         winner = self._resolve_forfeit_winner(agent_id)
         if self._game_runtime is not None:
             self._game_runtime.state = self._mark_runtime_forfeit(
