@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -9,6 +10,7 @@ from pydantic import Field
 
 from src.games.contracts import (
     ActionSpec,
+    AgentGameContext,
     ApplyResult,
     ChannelSpec,
     GameAction,
@@ -290,6 +292,65 @@ class ConnectFourGame:
                 summary="All cells are filled with no winner.",
             )
         return None
+
+    def render_agent_context(
+        self,
+        state: ConnectFourState,
+        viewer_id: str,
+        role: str,
+        *,
+        config: "GameConfig | None" = None,
+    ) -> AgentGameContext:
+        viewer = self.visible_state(state, viewer_id)
+        payload = viewer.payload
+        board = payload.get("board", [])
+        rendered_board = render_connect_four_board(board, bordered=False, empty_cell=".")
+        active_player = payload.get("active_player")
+
+        if role == "moderator":
+            # Show the active player's legal columns (not the moderator's empty list)
+            player_actions = self.legal_actions(state, active_player) if active_player else []
+            open_cols = (
+                player_actions[0].input_schema.get("column", []) if player_actions else []
+            )
+            return AgentGameContext(
+                instructions=[
+                    "role=presentation_referee",
+                    "Narrate only the authoritative state shown here.",
+                    "Do not choose moves, decide legality, or infer a winner from chat.",
+                    "If winner or is_draw is set, announce that engine-determined result plainly.",
+                ],
+                state_lines=[
+                    f"active_player={active_player}",
+                    f"winner={payload.get('winner')}",
+                    f"is_draw={payload.get('is_draw')}",
+                    f"move_count={payload.get('move_count')}",
+                    f"open_columns={json.dumps(open_cols)}",
+                    "board:",
+                    rendered_board,
+                ],
+            )
+
+        my_actions = self.legal_actions(state, viewer_id)
+        open_cols = (
+            my_actions[0].input_schema.get("column", []) if my_actions else []
+        )
+        return AgentGameContext(
+            instructions=[
+                "Any extra narration or identity talk may be ignored or rejected.",
+            ],
+            state_lines=[
+                f"active_player={active_player}",
+                f"winner={payload.get('winner')}",
+                f"is_draw={payload.get('is_draw')}",
+                f"move_count={payload.get('move_count')}",
+                f"legal_columns={json.dumps(open_cols)}",
+                "board:",
+                rendered_board,
+            ],
+            response_schema='{"column": <integer 1-7>}',
+            response_example='{"column": 4}',
+        )
 
     def parse_action_text(self, text: str) -> GameAction | None:
         match = _COLUMN_RE.search(text)

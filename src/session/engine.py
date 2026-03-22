@@ -115,6 +115,8 @@ class SessionEngine:
             if self._uses_engine_authoritative_game(config)
             else None
         )
+        if self._game_runtime is not None:
+            self._router.game_runtime = self._game_runtime
         self._pending_hitl_turn_inputs: asyncio.Queue[dict[str, str]] = asyncio.Queue()
         self._awaiting_hitl_turn = False
         # Pause gate — cleared when paused, set when running

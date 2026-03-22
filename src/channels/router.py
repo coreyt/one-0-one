@@ -22,10 +22,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from src.logging import get_logger
-from src.games.connect_four import render_connect_four_board
 from src.personas import build_personality_prompt, resolve_personality
 
 if TYPE_CHECKING:
+    from src.games.runtime import GameRuntime
     from src.session.config import AgentConfig, SessionConfig
     from src.session.events import SessionEvent
     from src.session.state import SessionState
@@ -35,191 +35,6 @@ log = get_logger(__name__)
 # How many recent events to send to a moderator in engine-authoritative games.
 # Players receive the game-move journal instead of event history.
 _MODERATOR_HISTORY_WINDOW = 20
-
-
-# ---------------------------------------------------------------------------
-# Battleship player journal — pluggable renderers
-# ---------------------------------------------------------------------------
-#
-# Each renderer receives a _BattleshipJournalCtx and returns a string that is
-# injected into the player's per-turn system message.  Add a new renderer
-# function and register it in _BATTLESHIP_JOURNAL_RENDERERS to expose it as
-# a valid ``game.journal_format`` option in session templates.
-# ---------------------------------------------------------------------------
-
-from dataclasses import dataclass  # noqa: E402 (local import to avoid top-level clutter)
-
-
-@dataclass(frozen=True)
-class _BattleshipJournalCtx:
-    my_history: dict       # coord → "hit"|"miss"
-    fired_count: int
-    remaining: int
-    opp_history: dict      # coord → "hit"|"miss"
-    opponent_id: str | None
-    ship_positions: dict   # ship_name → list[{coordinate, status}]
-    sunk: list[str]
-
-
-def _journal_renderer_xml(ctx: "_BattleshipJournalCtx") -> str:
-    """Structured XML — coordinate names are explicit named attributes.
-
-    The LLM can match fired coordinates by name without any spatial reasoning.
-    Best for most current models; eliminates the need to parse positional grids.
-    """
-    parts: list[str] = ["<game_state>"]
-    parts.append(
-        f'  <your_attacks fired="{ctx.fired_count}" remaining="{ctx.remaining}"'
-        ' rule="DO NOT fire at any coordinate already in this list">'
-    )
-    for coord, result in ctx.my_history.items():
-        parts.append(f'    <shot coordinate="{coord}" result="{result}"/>')
-    parts.append("  </your_attacks>")
-    if ctx.opponent_id is not None:
-        parts.append(f'  <opponent_attacks fired="{len(ctx.opp_history)}">')
-        for coord, result in ctx.opp_history.items():
-            parts.append(f'    <shot coordinate="{coord}" result="{result}"/>')
-        parts.append("  </opponent_attacks>")
-    if ctx.ship_positions:
-        parts.append("  <your_fleet>")
-        for ship_name, cells in ctx.ship_positions.items():
-            if ship_name in ctx.sunk:
-                status = "sunk"
-            else:
-                hit_count = sum(1 for c in cells if c.get("status") == "hit")
-                status = f"damaged({hit_count}_hit)" if hit_count else "intact"
-            parts.append(
-                f'    <ship name="{ship_name}" size="{len(cells)}" status="{status}"/>'
-            )
-        parts.append("  </your_fleet>")
-    parts.append("</game_state>")
-    return "\n".join(parts)
-
-
-def _journal_renderer_text(ctx: "_BattleshipJournalCtx") -> str:
-    """Compact unstructured text — tests whether a model can track state from plain text.
-
-    Coordinates appear as "E5:miss" tokens.  The LLM must parse and cross-reference
-    the list to avoid repeats rather than reading structured element names.
-    """
-    lines: list[str] = ["=== GAME STATE ==="]
-    if ctx.my_history:
-        tokens = [f"{c}:{r}" for c, r in ctx.my_history.items()]
-        lines.append(
-            f"Your shots ({ctx.fired_count} fired, {ctx.remaining} remaining)"
-            " — DO NOT fire at any coordinate in this list:"
-        )
-        for i in range(0, len(tokens), 10):
-            lines.append("  " + "  ".join(tokens[i : i + 10]))
-    else:
-        lines.append(f"Your shots: none yet ({ctx.remaining} available)")
-    if ctx.opp_history:
-        tokens = [f"{c}:{r}" for c, r in ctx.opp_history.items()]
-        lines.append(f"Opponent shots against your fleet ({len(tokens)} fired):")
-        for i in range(0, len(tokens), 10):
-            lines.append("  " + "  ".join(tokens[i : i + 10]))
-    else:
-        lines.append("Opponent shots against your fleet: none yet")
-    if ctx.ship_positions:
-        lines.append("Your fleet:")
-        for ship_name, cells in ctx.ship_positions.items():
-            if ship_name in ctx.sunk:
-                status = "SUNK"
-            else:
-                hit_count = sum(1 for c in cells if c.get("status") == "hit")
-                status = f"{hit_count} cell(s) hit" if hit_count else "intact"
-            lines.append(f"  {ship_name}({len(cells)}): {status}")
-    return "\n".join(lines)
-
-
-_BOARD_COLS = list("ABCDEFGHIJ")
-_BOARD_ROWS = list(range(1, 11))
-
-
-def _journal_renderer_board(ctx: "_BattleshipJournalCtx") -> str:
-    """2D attack grid — tests spatial/positional reasoning in the model.
-
-    Legend: · = unfired (legal target)  X = hit  O = miss
-    The LLM must map column letter + row number to a coordinate string
-    (e.g., column C, row 5 → "C5") rather than reading an explicit name.
-    """
-    lines: list[str] = ["=== GAME STATE ==="]
-    header = "    " + " ".join(_BOARD_COLS)
-    grid_rows = [header]
-    for row in _BOARD_ROWS:
-        cells = [
-            "X" if ctx.my_history.get(f"{col}{row}") == "hit"
-            else "O" if ctx.my_history.get(f"{col}{row}") == "miss"
-            else "·"
-            for col in _BOARD_COLS
-        ]
-        grid_rows.append(f"{row:>2}  " + " ".join(cells))
-    lines.append(
-        f"Your attack grid ({ctx.fired_count} fired, {ctx.remaining} remaining)"
-        " — · = legal target, X = hit (do not re-fire), O = miss (do not re-fire):"
-    )
-    lines.extend(grid_rows)
-    if ctx.opp_history:
-        tokens = [f"{c}:{r}" for c, r in ctx.opp_history.items()]
-        lines.append(f"Opponent shots against your fleet ({len(tokens)} fired):")
-        for i in range(0, len(tokens), 10):
-            lines.append("  " + "  ".join(tokens[i : i + 10]))
-    else:
-        lines.append("Opponent shots against your fleet: none yet")
-    if ctx.ship_positions:
-        lines.append("Your fleet:")
-        for ship_name, cells in ctx.ship_positions.items():
-            if ship_name in ctx.sunk:
-                status = "SUNK"
-            else:
-                hit_count = sum(1 for c in cells if c.get("status") == "hit")
-                status = f"{hit_count} cell(s) hit" if hit_count else "intact"
-            lines.append(f"  {ship_name}({len(cells)}): {status}")
-    return "\n".join(lines)
-
-
-# Registry: journal_format value → renderer callable
-_BATTLESHIP_JOURNAL_RENDERERS: dict[str, "_JournalRendererFn"] = {
-    "xml": _journal_renderer_xml,
-    "text": _journal_renderer_text,
-    "board": _journal_renderer_board,
-}
-
-from typing import Callable  # noqa: E402
-_JournalRendererFn = Callable[["_BattleshipJournalCtx"], str]
-
-
-def _build_battleship_player_journal(
-    agent_id: str,
-    viewer_payload: dict,
-    authoritative: dict,
-    *,
-    journal_format: str = "xml",
-) -> str:
-    """Dispatch to the configured journal renderer for a Battleship player.
-
-    Extracts state into a _BattleshipJournalCtx and calls the renderer registered
-    under ``journal_format`` in _BATTLESHIP_JOURNAL_RENDERERS.  Unknown formats
-    fall back to "xml".
-    """
-    players: list[str] = authoritative.get("players", [])
-    opponent_id = next((p for p in players if p != agent_id), None)
-    my_history: dict[str, str] = viewer_payload.get("attack_history", {})
-    own_fleet_info = viewer_payload.get("own_fleet", {})
-    ctx = _BattleshipJournalCtx(
-        my_history=my_history,
-        fired_count=len(my_history),
-        remaining=100 - len(my_history),
-        opp_history=(
-            authoritative.get("attack_history", {}).get(opponent_id, {})
-            if opponent_id else {}
-        ),
-        opponent_id=opponent_id,
-        ship_positions=own_fleet_info.get("ship_positions", {}),
-        sunk=own_fleet_info.get("sunk_ships", []),
-    )
-    renderer = _BATTLESHIP_JOURNAL_RENDERERS.get(journal_format, _journal_renderer_xml)
-    return renderer(ctx)
 
 
 # XML routing instructions injected into every agent's system prompt
@@ -357,6 +172,9 @@ class ChannelRouter:
         self._agent_configs: dict[str, "AgentConfig"] = {
             a.id: a for a in config.agents
         }
+        # Set by the engine after the game runtime is constructed.
+        # None for non-authoritative (llm-authority) sessions.
+        self.game_runtime: "GameRuntime | None" = None
 
     def build_context(
         self,
@@ -425,188 +243,29 @@ class ChannelRouter:
         agent_id: str,
         state: "SessionState",
     ) -> dict | None:
-        """Inject authoritative game-runtime view for plugin-backed sessions."""
-        custom = state.game_state.custom
-        authoritative = custom.get("authoritative_state")
-        if not isinstance(authoritative, dict):
+        """Inject authoritative game-runtime view for plugin-backed sessions.
+
+        Delegates all game-specific rendering to the game plugin via
+        GameRuntime.render_agent_context, then assembles the system message
+        with shared boilerplate (response schema hint, "Return exactly one
+        JSON object…").  Zero branching on game_type here.
+        """
+        if self.game_runtime is None:
             return None
-
-        visible_states = custom.get("visible_states", {})
-        legal_actions = custom.get("legal_actions", {})
-        viewer_state = visible_states.get(agent_id) if isinstance(visible_states, dict) else None
-        viewer_actions = legal_actions.get(agent_id) if isinstance(legal_actions, dict) else None
         agent = self._agent_configs[agent_id]
-        viewer_payload = (
-            viewer_state.get("payload")
-            if isinstance(viewer_state, dict) and isinstance(viewer_state.get("payload"), dict)
-            else viewer_state
+        ctx = self.game_runtime.render_agent_context(
+            viewer_id=agent_id,
+            role=agent.role,
+            game_config=self._config.game,
         )
-
-        import json
-
-        payload = {
-            "visible_state": viewer_payload,
-            "legal_actions": viewer_actions or [],
-        }
-        if agent.role == "moderator":
-            payload["authoritative_state"] = authoritative
-            payload["authority_mode"] = "engine_authoritative"
-        if custom.get("game_type") == "connect_four" and isinstance(viewer_payload, dict):
-            board = viewer_payload.get("board")
-            if isinstance(board, list):
-                rendered_board = render_connect_four_board(
-                    board,
-                    bordered=False,
-                    empty_cell=".",
-                )
-                details = ["[Authoritative game view]"]
-                if agent.role == "moderator":
-                    details.extend(
-                        [
-                            "role=presentation_referee",
-                            "Narrate only the authoritative state shown here.",
-                            "Do not choose moves, decide legality, or infer a winner from chat.",
-                            "If winner or is_draw is set, announce that engine-determined result plainly.",
-                        ]
-                    )
-                else:
-                    details.extend(
-                        [
-                            "response_schema={\"column\": <integer 1-7>}",
-                            "response_example={\"column\": 4}",
-                            "Return exactly one JSON object and no surrounding prose.",
-                            "Any extra narration or identity talk may be ignored or rejected.",
-                        ]
-                    )
-                details.extend(
-                    [
-                        f"active_player={viewer_payload.get('active_player')}",
-                        f"winner={viewer_payload.get('winner')}",
-                        f"is_draw={viewer_payload.get('is_draw')}",
-                        f"move_count={viewer_payload.get('move_count')}",
-                        "board:",
-                        rendered_board,
-                        f"legal_actions={json.dumps(payload['legal_actions'])}",
-                    ]
-                )
-                return {
-                    "role": "system",
-                    "content": "\n".join(details),
-                }
-        if custom.get("game_type") == "battleship" and isinstance(viewer_payload, dict):
-            details = ["[Authoritative game view]"]
-            if agent.role == "moderator":
-                details.extend(
-                    [
-                        "role=presentation_referee",
-                        "Read authoritative_state to narrate hit/miss/sunk results and both tracking grids.",
-                        "Do not validate moves or decide the winner yourself.",
-                        "Do not reveal hidden ship coordinates that have not been observed in play unless the game is already over.",
-                        f"authoritative_state={json.dumps(authoritative)}",
-                        f"visible_state={json.dumps(viewer_payload)}",
-                    ]
-                )
-            else:
-                fmt = (
-                    self._config.game.journal_format
-                    if self._config.game is not None
-                    else "xml"
-                )
-                journal = _build_battleship_player_journal(
-                    agent_id, viewer_payload, authoritative,
-                    journal_format=fmt,
-                )
-                details.extend(
-                    [
-                        'response_schema={"coordinate": "B5"}',
-                        'response_example={"coordinate": "A10"}',
-                        "Return exactly one JSON object and no surrounding prose.",
-                        journal,
-                        f"legal_actions={json.dumps(payload['legal_actions'])}",
-                    ]
-                )
-            return {
-                "role": "system",
-                "content": "\n".join(details),
-            }
-        if custom.get("game_type") == "mafia" and isinstance(viewer_payload, dict):
-            details = ["[Authoritative game view]"]
-            phase = viewer_payload.get("phase")
-            current_speaker = viewer_payload.get("current_speaker")
-            if agent.role == "moderator":
-                details.extend(
-                    [
-                        "role=presentation_referee",
-                        "Narrate only the authoritative state shown here.",
-                        "Do not decide votes, deaths, investigations, saves, or winners.",
-                        "Use the public game-generated events as the factual basis for announcements.",
-                        f"authoritative_state={json.dumps(authoritative)}",
-                        f"visible_state={json.dumps(viewer_payload)}",
-                    ]
-                )
-            elif viewer_actions:
-                if phase == "night_mafia_vote":
-                    details.extend(
-                        [
-                            'response_schema={"target": "<agent_id>"}',
-                            'response_example={"target": "villager_1"}',
-                        ]
-                    )
-                elif phase == "night_detective":
-                    details.extend(
-                        [
-                            'response_schema={"investigate": "<agent_id>"}',
-                            'response_example={"investigate": "mafia_don"}',
-                        ]
-                    )
-                elif phase == "night_doctor":
-                    details.extend(
-                        [
-                            'response_schema={"protect": "<agent_id>"}',
-                            'response_example={"protect": "detective"}',
-                        ]
-                    )
-                elif phase == "day_vote":
-                    details.extend(
-                        [
-                            'response_schema={"vote_for": "<agent_id>|null"}',
-                            'response_example={"vote_for": "mafia_don"}',
-                        ]
-                    )
-                details.extend(
-                    [
-                        "Return exactly one JSON object and no surrounding prose.",
-                        "Only the authoritative game view matters.",
-                    ]
-                )
-            else:
-                details.extend(
-                    [
-                        "This is a discussion turn. Respond with normal in-character dialogue only.",
-                        "Do not return JSON unless the authoritative view says this is an action phase.",
-                    ]
-                )
-                if phase == "night_mafia_discussion":
-                    details.append("Use the mafia channel for secret coordination.")
-                else:
-                    details.append("Speak publicly to persuade, accuse, defend, or claim roles if useful.")
-            details.extend(
-                [
-                    f"phase={phase}",
-                    f"round_number={viewer_payload.get('round_number')}",
-                    f"current_speaker={json.dumps(current_speaker)}",
-                    f"visible_state={json.dumps(viewer_payload)}",
-                    f"legal_actions={json.dumps(payload['legal_actions'])}",
-                ]
-            )
-            return {
-                "role": "system",
-                "content": "\n".join(details),
-            }
-        return {
-            "role": "system",
-            "content": f"[Authoritative game view] {json.dumps(payload)}",
-        }
+        details = ["[Authoritative game view]"]
+        details.extend(ctx.instructions)
+        details.extend(ctx.state_lines)
+        if ctx.response_schema is not None:
+            details.append(f"response_schema={ctx.response_schema}")
+            details.append(f"response_example={ctx.response_example}")
+            details.append("Return exactly one JSON object and no surrounding prose.")
+        return {"role": "system", "content": "\n".join(details)}
 
     def _event_to_message(
         self,

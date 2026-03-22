@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 import pytest
 
 from src.channels.router import ChannelRouter
+from src.games.contracts import AgentGameContext
 from src.session.config import (
     AgentConfig,
     ChannelConfig,
@@ -14,6 +15,18 @@ from src.session.config import (
     SessionConfig,
     TranscriptConfig,
 )
+
+
+class _GameRuntimeStub:
+    """Minimal duck-typed stub for GameRuntime used in router unit tests."""
+
+    def __init__(self, contexts: dict[tuple, AgentGameContext]) -> None:
+        self._contexts = contexts
+
+    def render_agent_context(
+        self, viewer_id: str, role: str, *, game_config=None
+    ) -> AgentGameContext:
+        return self._contexts.get((viewer_id, role), AgentGameContext())
 from src.session.events import (
     GameStateEvent,
     MessageEvent,
@@ -257,24 +270,19 @@ class TestSystemPrompt:
             "game": GameConfig(plugin="connect_four", name="Connect Four").model_dump(),
         })
         router = ChannelRouter(config)
+        router.game_runtime = _GameRuntimeStub({
+            ("player_red", "player"): AgentGameContext(
+                state_lines=[
+                    "active_player=player_red",
+                    "board:",
+                    "  1 2 3 4 5 6 7",
+                    ". . . . . . .",
+                ],
+                response_schema='{"column": <integer 1-7>}',
+                response_example='{"column": 4}',
+            ),
+        })
         state = _make_state(config)
-        state.game_state.custom["game_type"] = "connect_four"
-        state.game_state.custom["authoritative_state"] = {"active_player": "player_red"}
-        state.game_state.custom["visible_states"] = {
-            "player_red": {
-                "viewer_id": "player_red",
-                "payload": {
-                    "board": [["." for _ in range(7)] for _ in range(6)],
-                    "active_player": "player_red",
-                    "winner": None,
-                    "is_draw": False,
-                    "move_count": 0,
-                },
-            }
-        }
-        state.game_state.custom["legal_actions"] = {
-            "player_red": [{"action_type": "drop_disc", "input_schema": {"column": [1, 2, 3, 4, 5, 6, 7]}}],
-        }
 
         system = router.build_context("player_red", state)[1]["content"]
         assert "board:" in system
@@ -296,21 +304,14 @@ class TestSystemPrompt:
             "game": GameConfig(plugin="connect_four", name="Connect Four").model_dump(),
         })
         router = ChannelRouter(config)
+        router.game_runtime = _GameRuntimeStub({
+            ("player_red", "player"): AgentGameContext(
+                state_lines=["active_player=player_red"],
+                response_schema='{"column": <integer 1-7>}',
+                response_example='{"column": 4}',
+            ),
+        })
         state = _make_state(config)
-        state.game_state.custom["game_type"] = "connect_four"
-        state.game_state.custom["authoritative_state"] = {"active_player": "player_red"}
-        state.game_state.custom["visible_states"] = {
-            "player_red": {
-                "board": [["." for _ in range(7)] for _ in range(6)],
-                "active_player": "player_red",
-                "winner": None,
-                "is_draw": False,
-                "move_count": 0,
-            }
-        }
-        state.game_state.custom["legal_actions"] = {
-            "player_red": [{"action_type": "drop_disc", "input_schema": {"column": [1, 2, 3, 4, 5, 6, 7]}}],
-        }
 
         system = router.build_context("player_red", state)[1]["content"]
         assert 'response_schema={"column": <integer 1-7>}' in system
@@ -331,22 +332,16 @@ class TestSystemPrompt:
             "game": GameConfig(plugin="connect_four", name="Connect Four").model_dump(),
         })
         router = ChannelRouter(config)
+        router.game_runtime = _GameRuntimeStub({
+            ("referee", "moderator"): AgentGameContext(
+                instructions=[
+                    "role=presentation_referee",
+                    "Do not choose moves, decide legality, or infer a winner from chat.",
+                ],
+                state_lines=["active_player=player_black"],
+            ),
+        })
         state = _make_state(config)
-        state.game_state.custom["game_type"] = "connect_four"
-        state.game_state.custom["authoritative_state"] = {"active_player": "player_black", "winner": None}
-        state.game_state.custom["visible_states"] = {
-            "referee": {
-                "viewer_id": "referee",
-                "payload": {
-                    "board": [["." for _ in range(7)] for _ in range(6)],
-                    "active_player": "player_black",
-                    "winner": None,
-                    "is_draw": False,
-                    "move_count": 1,
-                },
-            }
-        }
-        state.game_state.custom["legal_actions"] = {"referee": []}
 
         system = router.build_context("referee", state)[1]["content"]
         assert "role=presentation_referee" in system
@@ -367,36 +362,18 @@ class TestSystemPrompt:
             "game": GameConfig(plugin="battleship", name="Battleship").model_dump(),
         })
         router = ChannelRouter(config)
+        router.game_runtime = _GameRuntimeStub({
+            ("captain_alpha", "player"): AgentGameContext(
+                state_lines=['<ship name="Carrier" size="5" status="intact"/>'],
+                response_schema='{"coordinate": "B5"}',
+                response_example='{"coordinate": "A10"}',
+            ),
+        })
         state = _make_state(config)
-        state.game_state.custom["game_type"] = "battleship"
-        state.game_state.custom["authoritative_state"] = {
-            "ship_positions": {
-                "captain_alpha": {"Carrier": ["A1", "A2", "A3", "A4", "A5"]},
-                "captain_beta": {"Carrier": ["B1", "B2", "B3", "B4", "B5"]},
-            }
-        }
-        state.game_state.custom["visible_states"] = {
-            "captain_alpha": {
-                "viewer_id": "captain_alpha",
-                "payload": {
-                    "active_player": "captain_alpha",
-                    "winner": None,
-                    "own_fleet": {
-                        "ship_positions": {"Carrier": [{"coordinate": "A1", "status": "intact"}]},
-                        "sunk_ships": [],
-                    },
-                    "attack_history": {},
-                    "last_shot": None,
-                },
-            }
-        }
-        state.game_state.custom["legal_actions"] = {
-            "captain_alpha": [{"action_type": "fire_shot", "input_schema": {"coordinate_pattern": "^[A-J](10|[1-9])$"}}]
-        }
 
         system = router.build_context("captain_alpha", state)[1]["content"]
         assert 'response_schema={"coordinate": "B5"}' in system
-        # Own fleet ships appear in the journal (without JSON quoting)
+        # Own fleet ships appear in the journal
         assert "Carrier" in system
         # Opponent ship coordinates must not be revealed
         assert "B1" not in system
@@ -416,28 +393,13 @@ class TestSystemPrompt:
             "game": GameConfig(plugin="battleship", name="Battleship").model_dump(),
         })
         router = ChannelRouter(config)
+        router.game_runtime = _GameRuntimeStub({
+            ("admiral", "moderator"): AgentGameContext(
+                instructions=["role=presentation_referee"],
+                state_lines=['authoritative_state={"attack_history": {"captain_alpha": {"B1": "hit"}}}'],
+            ),
+        })
         state = _make_state(config)
-        state.game_state.custom["game_type"] = "battleship"
-        state.game_state.custom["authoritative_state"] = {
-            "ship_positions": {
-                "captain_alpha": {"Carrier": ["A1", "A2", "A3", "A4", "A5"]},
-                "captain_beta": {"Carrier": ["B1", "B2", "B3", "B4", "B5"]},
-            },
-            "attack_history": {"captain_alpha": {"B1": "hit"}},
-        }
-        state.game_state.custom["visible_states"] = {
-            "admiral": {
-                "viewer_id": "admiral",
-                "payload": {
-                    "active_player": "captain_beta",
-                    "winner": None,
-                    "own_fleet": {"ship_positions": {}, "sunk_ships": []},
-                    "attack_history": {},
-                    "last_shot": {"coordinate": "B1", "result": "hit"},
-                },
-            }
-        }
-        state.game_state.custom["legal_actions"] = {"admiral": []}
 
         system = router.build_context("admiral", state)[1]["content"]
         assert "role=presentation_referee" in system
@@ -459,23 +421,15 @@ class TestSystemPrompt:
             "game": GameConfig(plugin="mafia", name="Mafia").model_dump(),
         })
         router = ChannelRouter(config)
+        router.game_runtime = _GameRuntimeStub({
+            ("mafia_don", "mafia"): AgentGameContext(
+                instructions=["Only the authoritative game view matters."],
+                state_lines=["phase=night_mafia_vote"],
+                response_schema='{"target": "<agent_id>"}',
+                response_example='{"target": "villager_1"}',
+            ),
+        })
         state = _make_state(config)
-        state.game_state.custom["game_type"] = "mafia"
-        state.game_state.custom["authoritative_state"] = {"phase": "night_mafia_vote"}
-        state.game_state.custom["visible_states"] = {
-            "mafia_don": {
-                "viewer_id": "mafia_don",
-                "payload": {
-                    "phase": "night_mafia_vote",
-                    "round_number": 1,
-                    "alive_players": [{"id": "mafia_don", "name": "Don"}],
-                    "current_speaker": "mafia_don",
-                },
-            }
-        }
-        state.game_state.custom["legal_actions"] = {
-            "mafia_don": [{"action_type": "night_mafia_vote", "input_schema": {}}],
-        }
 
         system = router.build_context("mafia_don", state)[1]["content"]
         assert 'response_schema={"target": "<agent_id>"}' in system
@@ -495,21 +449,17 @@ class TestSystemPrompt:
             "game": GameConfig(plugin="mafia", name="Mafia").model_dump(),
         })
         router = ChannelRouter(config)
+        router.game_runtime = _GameRuntimeStub({
+            ("villager_1", "villager"): AgentGameContext(
+                instructions=[
+                    "This is a discussion turn — respond with natural dialogue.",
+                    "Do not return JSON.",
+                    "Speak publicly.",
+                ],
+                state_lines=["phase=day_discussion"],
+            ),
+        })
         state = _make_state(config)
-        state.game_state.custom["game_type"] = "mafia"
-        state.game_state.custom["authoritative_state"] = {"phase": "day_discussion"}
-        state.game_state.custom["visible_states"] = {
-            "villager_1": {
-                "viewer_id": "villager_1",
-                "payload": {
-                    "phase": "day_discussion",
-                    "round_number": 1,
-                    "alive_players": [{"id": "villager_1", "name": "Rosa"}],
-                    "current_speaker": "villager_1",
-                },
-            }
-        }
-        state.game_state.custom["legal_actions"] = {"villager_1": []}
 
         system = router.build_context("villager_1", state)[1]["content"]
         assert "discussion turn" in system.lower()

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from src.games.contracts import (
     ActionSpec,
+    AgentGameContext,
     ApplyResult,
     Game,
     GameAction,
@@ -23,7 +24,7 @@ from src.games.moderation import (
 from src.games.registry import load_game_from_config
 
 if TYPE_CHECKING:
-    from src.session.config import SessionConfig
+    from src.session.config import GameConfig, SessionConfig
 
 
 @runtime_checkable
@@ -141,6 +142,19 @@ class GameRuntime:
         if isinstance(self.game, TextActionParser):
             return self.game.parse_action_text(text)
         return None
+
+    def render_agent_context(
+        self,
+        viewer_id: str,
+        role: str,
+        *,
+        game_config: "GameConfig | None" = None,
+    ) -> AgentGameContext:
+        """Thin wrapper: call the game plugin's render_agent_context with live state."""
+        self._sync_moderation_state()
+        return self.game.render_agent_context(
+            self.state, viewer_id, role, config=game_config
+        )
 
     def is_terminal(self) -> bool:
         self._sync_moderation_state()

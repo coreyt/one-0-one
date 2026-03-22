@@ -10,6 +10,24 @@ if TYPE_CHECKING:
     from src.session.config import AgentConfig, GameConfig
 
 
+class AgentGameContext(BaseModel):
+    """Rendered authoritative context for one agent's per-turn system prompt.
+
+    Each game plugin produces one of these for every agent on every turn.
+    The router assembles it into a system message with shared boilerplate.
+    """
+
+    instructions: list[str] = Field(default_factory=list)
+    """Role-specific guidance lines (moderator narration cues vs player action cues)."""
+    state_lines: list[str] = Field(default_factory=list)
+    """Rendered game state: board, journal, phase fields, legal action hints, etc."""
+    response_schema: str | None = None
+    """JSON schema hint for structured action responses, e.g. '{"coordinate": "B5"}'.
+    None means this is a discussion turn — no structured response expected."""
+    response_example: str | None = None
+    """Example matching response_schema. Required when response_schema is set."""
+
+
 class GameStateBase(BaseModel):
     """Base runtime state shared by all games."""
 
@@ -129,3 +147,20 @@ class Game(Protocol):
     def is_terminal(self, state: GameStateBase) -> bool: ...
 
     def outcome(self, state: GameStateBase) -> GameOutcome | None: ...
+
+    def render_agent_context(
+        self,
+        state: GameStateBase,
+        viewer_id: str,
+        role: str,
+        *,
+        config: "GameConfig | None" = None,
+    ) -> AgentGameContext:
+        """Return rendered context for one agent's per-turn system prompt.
+
+        The router calls this once per agent per turn and uses the returned
+        AgentGameContext to assemble the authoritative game system message.
+        Each game plugin owns its rendering logic — the router adds only
+        shared boilerplate (e.g. "Return exactly one JSON object…").
+        """
+        ...

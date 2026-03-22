@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import random
 import re
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Callable
 
 from pydantic import Field
 
 from src.games.contracts import (
     ActionSpec,
+    AgentGameContext,
     ApplyResult,
     ChannelSpec,
     GameAction,
@@ -22,6 +25,153 @@ from src.games.contracts import (
 
 if TYPE_CHECKING:
     from src.session.config import AgentConfig, GameConfig
+
+
+# ---------------------------------------------------------------------------
+# Battleship player journal — pluggable renderers
+# ---------------------------------------------------------------------------
+#
+# Each renderer receives a _BattleshipJournalCtx and returns a string
+# injected into the player's per-turn system message.  Add a new renderer
+# and register it in _BATTLESHIP_JOURNAL_RENDERERS to expose it as a valid
+# ``game.journal_format`` option in session templates.
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class _BattleshipJournalCtx:
+    my_history: dict       # coord → "hit"|"miss"
+    fired_count: int
+    remaining: int
+    opp_history: dict      # coord → "hit"|"miss"
+    opponent_id: str | None
+    ship_positions: dict   # ship_name → list[{coordinate, status}]
+    sunk: list[str]
+
+
+_JournalRendererFn = Callable[["_BattleshipJournalCtx"], str]
+
+_BOARD_COLS = list("ABCDEFGHIJ")
+_BOARD_ROWS = list(range(1, 11))
+
+
+def _journal_renderer_xml(ctx: _BattleshipJournalCtx) -> str:
+    """Structured XML — coordinate names are explicit named attributes.
+
+    The LLM can match fired coordinates by name without any spatial reasoning.
+    Best for most current models; eliminates the need to parse positional grids.
+    """
+    parts: list[str] = ["<game_state>"]
+    parts.append(
+        f'  <your_attacks fired="{ctx.fired_count}" remaining="{ctx.remaining}"'
+        ' rule="DO NOT fire at any coordinate already in this list">'
+    )
+    for coord, result in ctx.my_history.items():
+        parts.append(f'    <shot coordinate="{coord}" result="{result}"/>')
+    parts.append("  </your_attacks>")
+    if ctx.opponent_id is not None:
+        parts.append(f'  <opponent_attacks fired="{len(ctx.opp_history)}">')
+        for coord, result in ctx.opp_history.items():
+            parts.append(f'    <shot coordinate="{coord}" result="{result}"/>')
+        parts.append("  </opponent_attacks>")
+    if ctx.ship_positions:
+        parts.append("  <your_fleet>")
+        for ship_name, cells in ctx.ship_positions.items():
+            if ship_name in ctx.sunk:
+                status = "sunk"
+            else:
+                hit_count = sum(1 for c in cells if c.get("status") == "hit")
+                status = f"damaged({hit_count}_hit)" if hit_count else "intact"
+            parts.append(
+                f'    <ship name="{ship_name}" size="{len(cells)}" status="{status}"/>'
+            )
+        parts.append("  </your_fleet>")
+    parts.append("</game_state>")
+    return "\n".join(parts)
+
+
+def _journal_renderer_text(ctx: _BattleshipJournalCtx) -> str:
+    """Compact unstructured text — tests whether a model can track state from plain text.
+
+    Coordinates appear as "E5:miss" tokens.  The LLM must parse and cross-reference
+    the list to avoid repeats rather than reading structured element names.
+    """
+    lines: list[str] = ["=== GAME STATE ==="]
+    if ctx.my_history:
+        tokens = [f"{c}:{r}" for c, r in ctx.my_history.items()]
+        lines.append(
+            f"Your shots ({ctx.fired_count} fired, {ctx.remaining} remaining)"
+            " — DO NOT fire at any coordinate in this list:"
+        )
+        for i in range(0, len(tokens), 10):
+            lines.append("  " + "  ".join(tokens[i : i + 10]))
+    else:
+        lines.append(f"Your shots: none yet ({ctx.remaining} available)")
+    if ctx.opp_history:
+        tokens = [f"{c}:{r}" for c, r in ctx.opp_history.items()]
+        lines.append(f"Opponent shots against your fleet ({len(tokens)} fired):")
+        for i in range(0, len(tokens), 10):
+            lines.append("  " + "  ".join(tokens[i : i + 10]))
+    else:
+        lines.append("Opponent shots against your fleet: none yet")
+    if ctx.ship_positions:
+        lines.append("Your fleet:")
+        for ship_name, cells in ctx.ship_positions.items():
+            if ship_name in ctx.sunk:
+                status = "SUNK"
+            else:
+                hit_count = sum(1 for c in cells if c.get("status") == "hit")
+                status = f"{hit_count} cell(s) hit" if hit_count else "intact"
+            lines.append(f"  {ship_name}({len(cells)}): {status}")
+    return "\n".join(lines)
+
+
+def _journal_renderer_board(ctx: _BattleshipJournalCtx) -> str:
+    """2D attack grid — tests spatial/positional reasoning in the model.
+
+    Legend: · = unfired (legal target)  X = hit  O = miss
+    The LLM must map column letter + row number to a coordinate string
+    (e.g., column C, row 5 → "C5") rather than reading an explicit name.
+    """
+    lines: list[str] = ["=== GAME STATE ==="]
+    header = "    " + " ".join(_BOARD_COLS)
+    grid_rows = [header]
+    for row in _BOARD_ROWS:
+        cells = [
+            "X" if ctx.my_history.get(f"{col}{row}") == "hit"
+            else "O" if ctx.my_history.get(f"{col}{row}") == "miss"
+            else "·"
+            for col in _BOARD_COLS
+        ]
+        grid_rows.append(f"{row:>2}  " + " ".join(cells))
+    lines.append(
+        f"Your attack grid ({ctx.fired_count} fired, {ctx.remaining} remaining)"
+        " — · = legal target, X = hit (do not re-fire), O = miss (do not re-fire):"
+    )
+    lines.extend(grid_rows)
+    if ctx.opp_history:
+        tokens = [f"{c}:{r}" for c, r in ctx.opp_history.items()]
+        lines.append(f"Opponent shots against your fleet ({len(tokens)} fired):")
+        for i in range(0, len(tokens), 10):
+            lines.append("  " + "  ".join(tokens[i : i + 10]))
+    else:
+        lines.append("Opponent shots against your fleet: none yet")
+    if ctx.ship_positions:
+        lines.append("Your fleet:")
+        for ship_name, cells in ctx.ship_positions.items():
+            if ship_name in ctx.sunk:
+                status = "SUNK"
+            else:
+                hit_count = sum(1 for c in cells if c.get("status") == "hit")
+                status = f"{hit_count} cell(s) hit" if hit_count else "intact"
+            lines.append(f"  {ship_name}({len(cells)}): {status}")
+    return "\n".join(lines)
+
+
+_BATTLESHIP_JOURNAL_RENDERERS: dict[str, _JournalRendererFn] = {
+    "xml": _journal_renderer_xml,
+    "text": _journal_renderer_text,
+    "board": _journal_renderer_board,
+}
 
 
 _COORD_RE = re.compile(r"\b([A-Ja-j](?:10|[1-9]))\b")
@@ -252,6 +402,56 @@ class BattleshipGame:
         if match is None:
             return None
         return GameAction(action_type="fire_shot", payload={"coordinate": match.group(1).upper()})
+
+    def render_agent_context(
+        self,
+        state: BattleshipState,
+        viewer_id: str,
+        role: str,
+        *,
+        config: "GameConfig | None" = None,
+    ) -> AgentGameContext:
+        viewer = self.visible_state(state, viewer_id)
+        authoritative = state.model_dump()
+
+        if role == "moderator":
+            return AgentGameContext(
+                instructions=[
+                    "role=presentation_referee",
+                    "Read authoritative_state to narrate hit/miss/sunk results and both tracking grids.",
+                    "Do not validate moves or decide the winner yourself.",
+                    "Do not reveal hidden ship coordinates that have not been observed in play unless the game is already over.",
+                ],
+                state_lines=[
+                    f"authoritative_state={json.dumps(authoritative)}",
+                    f"visible_state={json.dumps(viewer.payload)}",
+                ],
+            )
+
+        journal_format = config.journal_format if config is not None else "xml"
+        players: list[str] = state.players
+        opponent_id = next((p for p in players if p != viewer_id), None)
+        my_history: dict[str, str] = viewer.payload.get("attack_history", {})
+        own_fleet_info = viewer.payload.get("own_fleet", {})
+        ctx = _BattleshipJournalCtx(
+            my_history=my_history,
+            fired_count=len(my_history),
+            remaining=100 - len(my_history),
+            opp_history=(
+                state.attack_history.get(opponent_id, {}) if opponent_id else {}
+            ),
+            opponent_id=opponent_id,
+            ship_positions=own_fleet_info.get("ship_positions", {}),
+            sunk=own_fleet_info.get("sunk_ships", []),
+        )
+        renderer = _BATTLESHIP_JOURNAL_RENDERERS.get(journal_format, _journal_renderer_xml)
+        journal = renderer(ctx)
+        return AgentGameContext(
+            instructions=[],
+            state_lines=[journal],
+            response_schema='{"coordinate": "B5"}',
+            response_example='{"coordinate": "A10"}',
+        )
 
     def parse_action_payload(self, payload: dict[str, Any]) -> GameAction | None:
         """Build a typed action from structured player output."""

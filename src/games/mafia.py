@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from typing import TYPE_CHECKING, Any
 
@@ -9,6 +10,7 @@ from pydantic import Field
 
 from src.games.contracts import (
     ActionSpec,
+    AgentGameContext,
     ApplyResult,
     ChannelSpec,
     GameAction,
@@ -298,6 +300,72 @@ class MafiaGame:
                 "discussion_index": next_state.discussion_index,
             },
             turn_advanced=True,
+        )
+
+    def render_agent_context(
+        self,
+        state: MafiaState,
+        viewer_id: str,
+        role: str,
+        *,
+        config: "GameConfig | None" = None,
+    ) -> AgentGameContext:
+        viewer = self.visible_state(state, viewer_id)
+        payload = viewer.payload
+        phase = payload.get("phase")
+
+        if role == "moderator":
+            return AgentGameContext(
+                instructions=[
+                    "role=presentation_referee",
+                    "Narrate only the authoritative state shown here.",
+                    "Do not decide votes, deaths, investigations, saves, or winners.",
+                    "Use the public game-generated events as the factual basis for announcements.",
+                ],
+                state_lines=[
+                    f"authoritative_state={json.dumps(state.model_dump())}",
+                    f"visible_state={json.dumps(payload)}",
+                ],
+            )
+
+        my_actions = self.legal_actions(state, viewer_id)
+        common_state = [
+            f"phase={phase}",
+            f"round_number={payload.get('round_number')}",
+            f"current_speaker={json.dumps(payload.get('current_speaker'))}",
+            f"visible_state={json.dumps(payload)}",
+            f"legal_actions={json.dumps([a.model_dump() for a in my_actions])}",
+        ]
+
+        if my_actions:
+            _action_schemas: dict[str, tuple[str, str]] = {
+                "night_mafia_vote": ('{"target": "<agent_id>"}', '{"target": "villager_1"}'),
+                "night_detective": ('{"investigate": "<agent_id>"}', '{"investigate": "mafia_don"}'),
+                "night_doctor": ('{"protect": "<agent_id>"}', '{"protect": "detective"}'),
+                "day_vote": ('{"vote_for": "<agent_id>|null"}', '{"vote_for": "mafia_don"}'),
+            }
+            schema, example = _action_schemas.get(
+                phase, ('{"target": "<agent_id>"}', '{"target": "player_1"}')
+            )
+            return AgentGameContext(
+                instructions=["Only the authoritative game view matters."],
+                state_lines=common_state,
+                response_schema=schema,
+                response_example=example,
+            )
+
+        discussion_hint = (
+            "Use the mafia channel for secret coordination."
+            if phase == "night_mafia_discussion"
+            else "Speak publicly to persuade, accuse, defend, or claim roles if useful."
+        )
+        return AgentGameContext(
+            instructions=[
+                "This is a discussion turn. Respond with normal in-character dialogue only.",
+                "Do not return JSON unless the authoritative view says this is an action phase.",
+                discussion_hint,
+            ],
+            state_lines=common_state,
         )
 
     def is_terminal(self, state: MafiaState) -> bool:
