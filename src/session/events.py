@@ -42,6 +42,13 @@ class MessageEvent(BaseModel):
     channel_id: str  # "public", "team_red", "private_nova_rex", etc.
     recipient_id: str | None = None  # set only for private messages
     text: str
+    tts_text: str | None = None
+    """ElevenLabs-annotated text for TTS (eleven_v3 [audio_tag] syntax).
+    Populated when the agent's message contained <feeling> tags.
+    None means use `text` as-is for audio generation."""
+    tts_voice_settings: dict[str, float] = {}
+    """voice_settings overrides aggregated from <feeling> tags (stability, style).
+    Applied to eleven_flash_v2_5 streaming requests. Empty = model defaults."""
     is_parallel: bool = False  # True when generated during a parallel turn
 
 

@@ -80,12 +80,18 @@ class SessionManager:
             ]
         )
 
-        # TTS: forward public MESSAGE events to the streamer work queue
+        # TTS: forward public MESSAGE events to the streamer work queue,
+        # passing tts_text and voice_settings from <feeling> tag processing.
         if streamer is not None:
             bus.stream().filter(
                 lambda e: e.type == "MESSAGE" and e.channel_id == "public"
             ).subscribe(
-                lambda e: streamer.enqueue_message(e.agent_id, e.text)
+                lambda e: streamer.enqueue_message(
+                    e.agent_id,
+                    e.text,
+                    tts_text=e.tts_text,
+                    voice_settings=e.tts_voice_settings or None,
+                )
             )
 
         self._sessions[session_id] = active

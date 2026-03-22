@@ -128,7 +128,8 @@ def build_script(
             continue
         if event.get("channel_id") not in channels:
             continue
-        text = (event.get("text") or "").strip()
+        # Prefer tts_text (eleven_v3 annotated) when present; fall back to text.
+        text = (event.get("tts_text") or event.get("text") or "").strip()
         if not text:
             continue
         script.append((event["agent_id"], event["agent_name"], text))

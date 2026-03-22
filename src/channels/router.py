@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 
 from src.logging import get_logger
 from src.personas import build_personality_prompt, resolve_personality
+from src.tts.inflection import feeling_instructions as _feeling_instructions
 
 if TYPE_CHECKING:
     from src.games.runtime import GameRuntime
@@ -152,6 +153,7 @@ def _build_system_prompt(agent: "AgentConfig", config: "SessionConfig") -> str:
             parts.append(f"How to play:\n{config.game.how_to_play.strip()}")
 
     parts.append(_CHANNEL_INSTRUCTIONS)
+    parts.append(_feeling_instructions())
 
     if agent.monologue and agent.monologue_mode == "prompt":
         parts.append(_MONOLOGUE_PROMPT)

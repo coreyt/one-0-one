@@ -58,6 +58,7 @@ from src.providers import CommunicationSegment, ProviderError
 from src.providers.litellm_client import LiteLLMClient
 from src.response_parser import ResponseParser
 from src.session.config import SessionConfig
+from src.tts.inflection import process_text as _process_feeling_tags
 from src.session.event_bus import EventBus
 from src.session.events import (
     ChannelCreatedEvent,
@@ -1697,9 +1698,15 @@ class SessionEngine:
         state: SessionState,
         team_channel_id: str | None,
     ) -> None:
-        text = segment.text.strip()
-        if not text:
+        raw = segment.text.strip()
+        if not raw:
             return
+
+        # Process <feeling> tags: strip for display, annotate for TTS.
+        _processed = _process_feeling_tags(raw)
+        text = _processed.clean
+        tts_text = _processed.v3_annotated if _processed.v3_annotated != text else None
+        tts_voice_settings = _processed.voice_settings
 
         if segment.visibility == "team":
             if not team_channel_id:
@@ -1719,6 +1726,8 @@ class SessionEngine:
                 model=model,
                 channel_id=team_channel_id,
                 text=text,
+                tts_text=tts_text,
+                tts_voice_settings=tts_voice_settings,
                 is_parallel=is_parallel,
             )
             self._emit_event(event, state)
@@ -1765,6 +1774,8 @@ class SessionEngine:
                 channel_id=private_channel_id,
                 recipient_id=recipient_id,
                 text=text,
+                tts_text=tts_text,
+                tts_voice_settings=tts_voice_settings,
                 is_parallel=is_parallel,
             )
             self._emit_event(event, state)
@@ -1786,6 +1797,8 @@ class SessionEngine:
             model=model,
             channel_id="public",
             text=text,
+            tts_text=tts_text,
+            tts_voice_settings=tts_voice_settings,
             is_parallel=is_parallel,
         )
         self._emit_event(event, state)

@@ -65,7 +65,8 @@ class SessionTTSStreamer:
         self._voice_map = voice_map
         self._model = model or settings.tts_streaming_model
         self._output_format = output_format
-        self._work_queue: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue()
+        # Queue items: (agent_id, text_for_tts, voice_settings_override)
+        self._work_queue: asyncio.Queue[tuple[str, str, dict[str, float]] | None] = asyncio.Queue()
         self._audio_queues: list[asyncio.Queue[bytes | None]] = []
         self._worker_task: asyncio.Task | None = None
         self._client: Any | None = None
@@ -91,11 +92,26 @@ class SessionTTSStreamer:
     # Event ingestion — sync, called from EventBus subscriber callbacks
     # ------------------------------------------------------------------
 
-    def enqueue_message(self, agent_id: str, text: str) -> None:
-        """Put a turn on the work queue. Non-blocking; safe from sync callbacks."""
+    def enqueue_message(
+        self,
+        agent_id: str,
+        text: str,
+        *,
+        tts_text: str | None = None,
+        voice_settings: dict[str, float] | None = None,
+    ) -> None:
+        """Put a turn on the work queue. Non-blocking; safe from sync callbacks.
+
+        Args:
+            agent_id:      Speaking agent.
+            text:          Clean text (fallback when tts_text is absent).
+            tts_text:      ElevenLabs-annotated text (preferred over text when present).
+            voice_settings: voice_settings overrides from <feeling> tags.
+        """
         if agent_id not in self._voice_map:
             return
-        self._work_queue.put_nowait((agent_id, text))
+        effective_text = tts_text if tts_text is not None else text
+        self._work_queue.put_nowait((agent_id, effective_text, voice_settings or {}))
 
     # ------------------------------------------------------------------
     # Audio consumer registration
@@ -123,13 +139,23 @@ class SessionTTSStreamer:
             self._client = ElevenLabs(api_key=settings.eleven_labs_api_key)
         return self._client
 
-    async def stream_turn(self, agent_id: str, text: str) -> AsyncIterator[bytes]:
+    async def stream_turn(
+        self,
+        agent_id: str,
+        text: str,
+        voice_settings: dict[str, float] | None = None,
+    ) -> AsyncIterator[bytes]:
         """
         Async generator — yields MP3 audio bytes for one message turn.
 
         The ElevenLabs SDK is synchronous; it runs in a thread pool executor
         with a bridge queue so chunks are forwarded to the async generator as
         they arrive from the network, rather than waiting for the full response.
+
+        Args:
+            agent_id:      Speaking agent (must be in voice_map).
+            text:          Text to synthesise (may contain eleven_v3 [audio_tag]s).
+            voice_settings: Per-turn voice_settings overrides from <feeling> tags.
         """
         voice_id = self._voice_map.get(agent_id)
         if not voice_id:
@@ -145,15 +171,24 @@ class SessionTTSStreamer:
         loop = asyncio.get_running_loop()
         bridge: asyncio.Queue[bytes | None] = asyncio.Queue()
 
+        # Build optional VoiceSettings from feeling-tag overrides
+        sdk_voice_settings = None
+        if voice_settings:
+            from elevenlabs import VoiceSettings
+            sdk_voice_settings = VoiceSettings(**voice_settings)
+
         def _produce() -> None:
             """Run in thread pool — forwards chunks to bridge queue."""
             try:
-                for chunk in client.text_to_speech.stream(
+                kwargs: dict = dict(
                     voice_id=voice_id,
                     text=text,
                     model_id=model,
                     output_format=output_format,
-                ):
+                )
+                if sdk_voice_settings is not None:
+                    kwargs["voice_settings"] = sdk_voice_settings
+                for chunk in client.text_to_speech.stream(**kwargs):
                     if isinstance(chunk, bytes):
                         loop.call_soon_threadsafe(bridge.put_nowait, chunk)
             except Exception as exc:
@@ -189,10 +224,10 @@ class SessionTTSStreamer:
             if item is None:
                 break
 
-            agent_id, text = item
+            agent_id, text, voice_settings = item
             log.debug("tts.streaming_turn", agent_id=agent_id, chars=len(text))
 
-            async for chunk in self.stream_turn(agent_id, text):
+            async for chunk in self.stream_turn(agent_id, text, voice_settings or None):
                 for q in self._audio_queues:
                     q.put_nowait(chunk)
 
