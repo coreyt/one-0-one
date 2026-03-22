@@ -396,8 +396,10 @@ class TestSystemPrompt:
 
         system = router.build_context("captain_alpha", state)[1]["content"]
         assert 'response_schema={"coordinate": "B5"}' in system
-        assert '"A1"' in system
-        assert '"B1"' not in system
+        # Own fleet ships appear in the journal (without JSON quoting)
+        assert "Carrier" in system
+        # Opponent ship coordinates must not be revealed
+        assert "B1" not in system
 
     def test_battleship_moderator_context_includes_authoritative_state(self):
         config = SessionConfig.model_validate({

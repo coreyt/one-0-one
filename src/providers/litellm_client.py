@@ -360,24 +360,62 @@ class LiteLLMClient:
                 f"Authentication failed for {model}: {exc}",
                 provider=provider,
                 model=model,
+                retryable=False,
+            ) from exc
+        except litellm.exceptions.NotFoundError as exc:
+            raise ProviderError(
+                f"Model not found: {model}: {exc}",
+                provider=provider,
+                model=model,
+                retryable=False,
+            ) from exc
+        except litellm.exceptions.BadRequestError as exc:
+            raise ProviderError(
+                f"Bad request for {model}: {exc}",
+                provider=provider,
+                model=model,
+                retryable=False,
+            ) from exc
+        except litellm.exceptions.PermissionDeniedError as exc:
+            raise ProviderError(
+                f"Permission denied for {model}: {exc}",
+                provider=provider,
+                model=model,
+                retryable=False,
             ) from exc
         except litellm.exceptions.RateLimitError as exc:
             raise ProviderError(
                 f"Rate limit exceeded for {model}: {exc}",
                 provider=provider,
                 model=model,
+                retryable=True,
             ) from exc
         except litellm.exceptions.APIConnectionError as exc:
             raise ProviderError(
                 f"Cannot connect to LiteLLM router at {self._router_url}: {exc}",
                 provider=provider,
                 model=model,
+                retryable=True,
             ) from exc
         except Exception as exc:
+            # Check the wrapped cause — LiteLLM sometimes wraps permanent errors
+            # (e.g. NotFoundError) inside a generic InternalServerError.
+            cause = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
+            permanent_types = (
+                litellm.exceptions.NotFoundError,
+                litellm.exceptions.AuthenticationError,
+                litellm.exceptions.BadRequestError,
+                litellm.exceptions.PermissionDeniedError,
+            )
+            is_permanent = isinstance(cause, permanent_types) or any(
+                kw in str(exc).lower()
+                for kw in ("not found", "does not exist", "invalid model", "no such model")
+            )
             raise ProviderError(
                 f"Unexpected error calling {model}: {exc}",
                 provider=provider,
                 model=model,
+                retryable=not is_permanent,
             ) from exc
 
         duration_ms = int(time.monotonic() * 1000 - start_ms)

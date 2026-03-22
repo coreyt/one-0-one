@@ -97,6 +97,12 @@ _SETUP_LEVELS = [
     ("Advanced", "advanced"),
 ]
 
+_JOURNAL_FORMATS = [
+    ("XML (structured, named elements)", "xml"),
+    ("Text (compact token list)", "text"),
+    ("Board (2D spatial grid)", "board"),
+]
+
 
 class AgentEditModal(ModalScreen[dict | None]):
     """Modal for editing a single agent's fields."""
@@ -383,6 +389,21 @@ class SetupWizardScreen(Screen):
         basic_gameplay.mount(Switch(value=False, id="input-player-monologue"))
         basic_gameplay.display = False
 
+        # ── Game Journal Format (intermediate+) ──
+        pane.mount(Static(id="game-journal-section"))
+        journal_section = self.query_one("#game-journal-section")
+        journal_section.mount(Label("━━ Move Journal Format ━━", classes="section-header"))
+        journal_section.mount(
+            Label(
+                "How game state is presented to each LLM player each turn. "
+                "Use different formats to test model capability.",
+                classes="field-help",
+            )
+        )
+        journal_section.mount(Label("Journal Format:", classes="field-label"))
+        journal_section.mount(Select(_JOURNAL_FORMATS, value="xml", id="input-game-journal-format"))
+        journal_section.display = False
+
         # ── Game Configuration (conditional) ──
         pane.mount(Static(id="game-config-section"))
         game_section = self.query_one("#game-config-section")
@@ -559,6 +580,7 @@ class SetupWizardScreen(Screen):
             self._set_section_visibility("#topic-metadata-section", level in {"intermediate", "advanced"})
             self._set_section_visibility("#game-summary-section", True)
             self._set_section_visibility("#basic-gameplay-section", True)
+            self._set_section_visibility("#game-journal-section", level in {"intermediate", "advanced"})
             self._set_section_visibility("#game-config-section", level == "advanced")
             self._set_section_visibility("#advanced-section", level == "advanced")
             self._set_section_visibility("#transcript-section", level in {"intermediate", "advanced"})
@@ -785,6 +807,7 @@ class SetupWizardScreen(Screen):
                     str(cfg.game.max_rounds) if cfg.game.max_rounds else ""
                 )
                 self.query_one("#input-game-hitl", Switch).value = cfg.game.hitl_compatible
+                self.query_one("#input-game-journal-format", Select).value = cfg.game.journal_format
                 self.query_one("#input-player-monologue", Switch).value = any(
                     agent.monologue for agent in cfg.agents if agent.role == "player"
                 )
@@ -886,6 +909,7 @@ class SetupWizardScreen(Screen):
                 max_rounds_str = self.query_one("#input-game-max-rounds", Input).value.strip()
                 max_rounds = int(max_rounds_str) if max_rounds_str else None
                 hitl_compatible = self.query_one("#input-game-hitl", Switch).value
+                journal_format = self.query_one("#input-game-journal-format", Select).value
                 game_data = {
                     **base_game_data,
                     "name": game_name or title,
@@ -895,6 +919,7 @@ class SetupWizardScreen(Screen):
                     "win_condition": win_condition,
                     "hitl_compatible": hitl_compatible,
                     "max_rounds": max_rounds,
+                    "journal_format": journal_format,
                 }
 
             # LLM defaults

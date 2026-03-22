@@ -32,6 +32,196 @@ if TYPE_CHECKING:
 
 log = get_logger(__name__)
 
+# How many recent events to send to a moderator in engine-authoritative games.
+# Players receive the game-move journal instead of event history.
+_MODERATOR_HISTORY_WINDOW = 20
+
+
+# ---------------------------------------------------------------------------
+# Battleship player journal — pluggable renderers
+# ---------------------------------------------------------------------------
+#
+# Each renderer receives a _BattleshipJournalCtx and returns a string that is
+# injected into the player's per-turn system message.  Add a new renderer
+# function and register it in _BATTLESHIP_JOURNAL_RENDERERS to expose it as
+# a valid ``game.journal_format`` option in session templates.
+# ---------------------------------------------------------------------------
+
+from dataclasses import dataclass  # noqa: E402 (local import to avoid top-level clutter)
+
+
+@dataclass(frozen=True)
+class _BattleshipJournalCtx:
+    my_history: dict       # coord → "hit"|"miss"
+    fired_count: int
+    remaining: int
+    opp_history: dict      # coord → "hit"|"miss"
+    opponent_id: str | None
+    ship_positions: dict   # ship_name → list[{coordinate, status}]
+    sunk: list[str]
+
+
+def _journal_renderer_xml(ctx: "_BattleshipJournalCtx") -> str:
+    """Structured XML — coordinate names are explicit named attributes.
+
+    The LLM can match fired coordinates by name without any spatial reasoning.
+    Best for most current models; eliminates the need to parse positional grids.
+    """
+    parts: list[str] = ["<game_state>"]
+    parts.append(
+        f'  <your_attacks fired="{ctx.fired_count}" remaining="{ctx.remaining}"'
+        ' rule="DO NOT fire at any coordinate already in this list">'
+    )
+    for coord, result in ctx.my_history.items():
+        parts.append(f'    <shot coordinate="{coord}" result="{result}"/>')
+    parts.append("  </your_attacks>")
+    if ctx.opponent_id is not None:
+        parts.append(f'  <opponent_attacks fired="{len(ctx.opp_history)}">')
+        for coord, result in ctx.opp_history.items():
+            parts.append(f'    <shot coordinate="{coord}" result="{result}"/>')
+        parts.append("  </opponent_attacks>")
+    if ctx.ship_positions:
+        parts.append("  <your_fleet>")
+        for ship_name, cells in ctx.ship_positions.items():
+            if ship_name in ctx.sunk:
+                status = "sunk"
+            else:
+                hit_count = sum(1 for c in cells if c.get("status") == "hit")
+                status = f"damaged({hit_count}_hit)" if hit_count else "intact"
+            parts.append(
+                f'    <ship name="{ship_name}" size="{len(cells)}" status="{status}"/>'
+            )
+        parts.append("  </your_fleet>")
+    parts.append("</game_state>")
+    return "\n".join(parts)
+
+
+def _journal_renderer_text(ctx: "_BattleshipJournalCtx") -> str:
+    """Compact unstructured text — tests whether a model can track state from plain text.
+
+    Coordinates appear as "E5:miss" tokens.  The LLM must parse and cross-reference
+    the list to avoid repeats rather than reading structured element names.
+    """
+    lines: list[str] = ["=== GAME STATE ==="]
+    if ctx.my_history:
+        tokens = [f"{c}:{r}" for c, r in ctx.my_history.items()]
+        lines.append(
+            f"Your shots ({ctx.fired_count} fired, {ctx.remaining} remaining)"
+            " — DO NOT fire at any coordinate in this list:"
+        )
+        for i in range(0, len(tokens), 10):
+            lines.append("  " + "  ".join(tokens[i : i + 10]))
+    else:
+        lines.append(f"Your shots: none yet ({ctx.remaining} available)")
+    if ctx.opp_history:
+        tokens = [f"{c}:{r}" for c, r in ctx.opp_history.items()]
+        lines.append(f"Opponent shots against your fleet ({len(tokens)} fired):")
+        for i in range(0, len(tokens), 10):
+            lines.append("  " + "  ".join(tokens[i : i + 10]))
+    else:
+        lines.append("Opponent shots against your fleet: none yet")
+    if ctx.ship_positions:
+        lines.append("Your fleet:")
+        for ship_name, cells in ctx.ship_positions.items():
+            if ship_name in ctx.sunk:
+                status = "SUNK"
+            else:
+                hit_count = sum(1 for c in cells if c.get("status") == "hit")
+                status = f"{hit_count} cell(s) hit" if hit_count else "intact"
+            lines.append(f"  {ship_name}({len(cells)}): {status}")
+    return "\n".join(lines)
+
+
+_BOARD_COLS = list("ABCDEFGHIJ")
+_BOARD_ROWS = list(range(1, 11))
+
+
+def _journal_renderer_board(ctx: "_BattleshipJournalCtx") -> str:
+    """2D attack grid — tests spatial/positional reasoning in the model.
+
+    Legend: · = unfired (legal target)  X = hit  O = miss
+    The LLM must map column letter + row number to a coordinate string
+    (e.g., column C, row 5 → "C5") rather than reading an explicit name.
+    """
+    lines: list[str] = ["=== GAME STATE ==="]
+    header = "    " + " ".join(_BOARD_COLS)
+    grid_rows = [header]
+    for row in _BOARD_ROWS:
+        cells = [
+            "X" if ctx.my_history.get(f"{col}{row}") == "hit"
+            else "O" if ctx.my_history.get(f"{col}{row}") == "miss"
+            else "·"
+            for col in _BOARD_COLS
+        ]
+        grid_rows.append(f"{row:>2}  " + " ".join(cells))
+    lines.append(
+        f"Your attack grid ({ctx.fired_count} fired, {ctx.remaining} remaining)"
+        " — · = legal target, X = hit (do not re-fire), O = miss (do not re-fire):"
+    )
+    lines.extend(grid_rows)
+    if ctx.opp_history:
+        tokens = [f"{c}:{r}" for c, r in ctx.opp_history.items()]
+        lines.append(f"Opponent shots against your fleet ({len(tokens)} fired):")
+        for i in range(0, len(tokens), 10):
+            lines.append("  " + "  ".join(tokens[i : i + 10]))
+    else:
+        lines.append("Opponent shots against your fleet: none yet")
+    if ctx.ship_positions:
+        lines.append("Your fleet:")
+        for ship_name, cells in ctx.ship_positions.items():
+            if ship_name in ctx.sunk:
+                status = "SUNK"
+            else:
+                hit_count = sum(1 for c in cells if c.get("status") == "hit")
+                status = f"{hit_count} cell(s) hit" if hit_count else "intact"
+            lines.append(f"  {ship_name}({len(cells)}): {status}")
+    return "\n".join(lines)
+
+
+# Registry: journal_format value → renderer callable
+_BATTLESHIP_JOURNAL_RENDERERS: dict[str, "_JournalRendererFn"] = {
+    "xml": _journal_renderer_xml,
+    "text": _journal_renderer_text,
+    "board": _journal_renderer_board,
+}
+
+from typing import Callable  # noqa: E402
+_JournalRendererFn = Callable[["_BattleshipJournalCtx"], str]
+
+
+def _build_battleship_player_journal(
+    agent_id: str,
+    viewer_payload: dict,
+    authoritative: dict,
+    *,
+    journal_format: str = "xml",
+) -> str:
+    """Dispatch to the configured journal renderer for a Battleship player.
+
+    Extracts state into a _BattleshipJournalCtx and calls the renderer registered
+    under ``journal_format`` in _BATTLESHIP_JOURNAL_RENDERERS.  Unknown formats
+    fall back to "xml".
+    """
+    players: list[str] = authoritative.get("players", [])
+    opponent_id = next((p for p in players if p != agent_id), None)
+    my_history: dict[str, str] = viewer_payload.get("attack_history", {})
+    own_fleet_info = viewer_payload.get("own_fleet", {})
+    ctx = _BattleshipJournalCtx(
+        my_history=my_history,
+        fired_count=len(my_history),
+        remaining=100 - len(my_history),
+        opp_history=(
+            authoritative.get("attack_history", {}).get(opponent_id, {})
+            if opponent_id else {}
+        ),
+        opponent_id=opponent_id,
+        ship_positions=own_fleet_info.get("ship_positions", {}),
+        sunk=own_fleet_info.get("sunk_ships", []),
+    )
+    renderer = _BATTLESHIP_JOURNAL_RENDERERS.get(journal_format, _journal_renderer_xml)
+    return renderer(ctx)
+
+
 # XML routing instructions injected into every agent's system prompt
 _CHANNEL_INSTRUCTIONS = """
 Communication channels:
@@ -78,6 +268,32 @@ follow the game rules, and do not assume there is an engine-owned authoritative 
 the moderator explicitly establishes one in the conversation."""
 
 
+def _make_system_message(text: str, provider: str) -> dict:
+    """Return an OpenAI-format system message with provider-appropriate caching markers.
+
+    Anthropic: wraps content in a structured block with ``cache_control`` so the
+    static system prompt is cached across turns by the Anthropic API, cutting
+    per-call prompt costs on long games.
+
+    Google/Gemini: uses a separate Context Cache API — inline ``cache_control``
+    blocks are not accepted and would cause API errors.  Content stays a plain string.
+
+    OpenAI and others: automatic prefix caching requires no explicit marker.
+    """
+    if provider == "anthropic":
+        return {
+            "role": "system",
+            "content": [
+                {
+                    "type": "text",
+                    "text": text,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+        }
+    return {"role": "system", "content": text}
+
+
 def _build_system_prompt(agent: "AgentConfig", config: "SessionConfig") -> str:
     """Construct the system prompt for an agent."""
     parts: list[str] = []
@@ -97,8 +313,29 @@ def _build_system_prompt(agent: "AgentConfig", config: "SessionConfig") -> str:
     if agent.persona:
         parts.append(agent.persona)
 
-    parts.append(f"Your role in this session: {agent.role}")
+    # Explicit identity — for games the model must know its own name and player id
+    # so it never confuses itself with another participant.
+    if config.setting == "game" and config.game is not None:
+        parts.append(
+            f"You are {agent.name}. "
+            f'Your player identifier in this game is "{agent.id}". '
+            f"Your role: {agent.role}."
+        )
+    else:
+        parts.append(f"Your role in this session: {agent.role}")
+
     parts.append(f"\nSession topic:\n{config.topic}")
+
+    # Game rules and how-to-play are static context (not per-turn game state).
+    # Injecting them here means every turn the model has the authoritative ruleset,
+    # and they are eligible for prompt caching on providers that support it.
+    if config.setting == "game" and config.game is not None:
+        if config.game.rules:
+            rules_text = "\n".join(f"- {rule}" for rule in config.game.rules)
+            parts.append(f"Game rules:\n{rules_text}")
+        if config.game.how_to_play:
+            parts.append(f"How to play:\n{config.game.how_to_play.strip()}")
+
     parts.append(_CHANNEL_INSTRUCTIONS)
 
     if agent.monologue and agent.monologue_mode == "prompt":
@@ -134,18 +371,42 @@ class ChannelRouter:
         """
         agent = self._agent_configs[agent_id]
         messages: list[dict] = [
-            {
-                "role": "system",
-                "content": _build_system_prompt(agent, self._config),
-            }
+            _make_system_message(
+                _build_system_prompt(agent, self._config),
+                agent.provider,
+            )
         ]
 
         authority_message = self._build_authoritative_game_message(agent_id, state)
         if authority_message is not None:
             messages.append(authority_message)
 
+        # For engine-authoritative games the injected game message already
+        # contains complete, current state.  Players get the journal instead of
+        # the full chat history; moderators get a recent-events window.
+        is_engine_auth = (
+            self._config.game is not None
+            and self._config.game.authority_mode == "engine_authoritative"
+        )
+        if is_engine_auth and agent.role != "moderator":
+            # Players: journal only — no chat history needed.
+            log.debug(
+                "channel.context_built",
+                agent_id=agent_id,
+                total_events=len(state.events),
+                visible_events=0,
+                mode="journal_only",
+            )
+            return messages
+
+        events_to_scan = state.events
+        if is_engine_auth and agent.role == "moderator":
+            # Moderators: only the most recent window so they can narrate
+            # without re-reading hundreds of old turns.
+            events_to_scan = state.events[-_MODERATOR_HISTORY_WINDOW:]
+
         visible_count = 0
-        for event in state.events:
+        for event in events_to_scan:
             msg = self._event_to_message(event, agent_id)
             if msg is not None:
                 messages.append(msg)
@@ -246,13 +507,21 @@ class ChannelRouter:
                     ]
                 )
             else:
+                fmt = (
+                    self._config.game.journal_format
+                    if self._config.game is not None
+                    else "xml"
+                )
+                journal = _build_battleship_player_journal(
+                    agent_id, viewer_payload, authoritative,
+                    journal_format=fmt,
+                )
                 details.extend(
                     [
                         'response_schema={"coordinate": "B5"}',
                         'response_example={"coordinate": "A10"}',
                         "Return exactly one JSON object and no surrounding prose.",
-                        "Use only your visible state and prior observed results; do not infer hidden enemy ship locations as facts.",
-                        f"visible_state={json.dumps(viewer_payload)}",
+                        journal,
                         f"legal_actions={json.dumps(payload['legal_actions'])}",
                     ]
                 )

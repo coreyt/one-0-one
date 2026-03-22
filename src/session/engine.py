@@ -80,6 +80,9 @@ log = get_logger(__name__)
 # Maximum retries for a rule-violating agent before skipping their turn
 _MAX_VIOLATION_RETRIES = 2
 _PROVIDER_BACKOFF_SCHEDULE_SECONDS = [2, 4, 8, 16, 32, 64, 128]
+# After this many consecutive retryable errors for the same agent the session
+# ends rather than looping at the maximum backoff interval forever.
+_MAX_CONSECUTIVE_PROVIDER_ERRORS = len(_PROVIDER_BACKOFF_SCHEDULE_SECONDS)
 
 
 class SessionEngine:
@@ -504,12 +507,14 @@ class SessionEngine:
                 agent_id=agent_id,
                 model=requested_model,
                 error=str(exc),
+                retryable=exc.retryable,
             )
             state.game_state.incidents.append({
                 "turn": state.turn_number,
                 "agent_id": agent_id,
                 "model": requested_model,
                 "type": incident_type,
+                "retryable": exc.retryable,
             })
             incident_event = IncidentEvent(
                 timestamp=datetime.now(UTC),
@@ -522,6 +527,28 @@ class SessionEngine:
                 detail=str(exc),
             )
             self._emit_event(incident_event, state)
+
+            if not exc.retryable:
+                # Permanent failure — end the session immediately rather than
+                # burning time in a retry loop that will never succeed.
+                log.error(
+                    "llm.fatal_error",
+                    agent_id=agent_id,
+                    model=requested_model,
+                    reason="non_retryable_provider_error",
+                    error=str(exc),
+                )
+                state.game_state.custom["fatal_error"] = {
+                    "agent_id": agent_id,
+                    "model": requested_model,
+                    "error": str(exc),
+                }
+                if self._pending_presentation_agent_id(state) == agent_id:
+                    self._clear_pending_presentation(state)
+                agent_state.status = "idle"
+                self._end_session_with_error(state, str(exc))
+                return
+
             self._schedule_provider_backoff(
                 state=state,
                 agent_id=agent_id,
@@ -814,6 +841,23 @@ class SessionEngine:
             reason=safe_reason,  # type: ignore[arg-type]
         )
 
+    def _end_session_with_error(self, state: SessionState, detail: str) -> None:
+        """Emit SESSION_END with reason='error' and set state.end_reason.
+
+        Called when a provider error is determined to be unrecoverable so the
+        main loop can exit cleanly on its next iteration.
+        """
+        end_event = self._make_end_event(state, "error")
+        end_event.message = detail[:200]
+        self._emit_event(end_event, state)
+        state.end_reason = "error"
+        log.error(
+            "session.ended",
+            reason="error",
+            turns=state.turn_number,
+            detail=detail[:200],
+        )
+
     async def _honor_provider_backoff(self, state: SessionState) -> None:
         pending = state.game_state.custom.get("_pending_provider_backoff")
         if not isinstance(pending, dict):
@@ -866,6 +910,24 @@ class SessionEngine:
         attempts = state.game_state.custom.setdefault("provider_error_counts", {})
         attempt = int(attempts.get(agent_id, 0)) + 1
         attempts[agent_id] = attempt
+
+        if attempt > _MAX_CONSECUTIVE_PROVIDER_ERRORS:
+            # Retryable error but the backoff schedule is exhausted — give up
+            # rather than looping at the maximum delay indefinitely.
+            log.error(
+                "llm.fatal_error",
+                agent_id=agent_id,
+                reason="max_consecutive_provider_errors_exceeded",
+                attempts=attempt,
+            )
+            state.game_state.custom["fatal_error"] = {
+                "agent_id": agent_id,
+                "error": detail,
+                "attempts": attempt,
+            }
+            self._end_session_with_error(state, detail)
+            return
+
         delay = self._next_provider_backoff_seconds(attempt)
         state.game_state.custom["_pending_provider_backoff"] = {
             "agent_id": agent_id,

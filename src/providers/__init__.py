@@ -81,12 +81,26 @@ class CompletionResult:
 
 
 class ProviderError(Exception):
-    """Raised when an LLM provider call fails."""
+    """Raised when an LLM provider call fails.
 
-    def __init__(self, message: str, provider: str = "", model: str = "") -> None:
+    retryable=True  — transient failure (rate limit, timeout, connection drop);
+                      the engine should back off and retry.
+    retryable=False — permanent failure (bad API key, model not found, bad
+                      request); retrying will never succeed and the engine
+                      should end the session immediately.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        provider: str = "",
+        model: str = "",
+        retryable: bool = True,
+    ) -> None:
         super().__init__(message)
         self.provider = provider
         self.model = model
+        self.retryable = retryable
 
 
 @runtime_checkable

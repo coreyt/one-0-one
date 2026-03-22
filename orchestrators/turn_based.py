@@ -135,20 +135,53 @@ def orchestrate(input: OrchestratorInput) -> OrchestratorOutput:
         return OrchestratorOutput(next_agents=[first.id], advance_turns=1)
 
     # ----------------------------------------------------------------
-    # Last public speaker was a player → narrator goes next
+    # Last public speaker was a player → narrator goes next (if due)
     # ----------------------------------------------------------------
     last_speaker_id = public_msgs[-1].agent_id
     last_was_player = narrator is None or last_speaker_id != narrator.id
 
     if last_was_player and narrator is not None and not narrator_just_attempted:
-        log.info(
-            "orchestrator.decision",
-            reason="narrator_turn",
-            trigger="after_player",
-            next_agents=[narrator.id],
-            turn=turn,
+        narrator_due = True
+        freq = (
+            config.game.narrator_frequency
+            if config.game is not None
+            else None
         )
-        return OrchestratorOutput(next_agents=[narrator.id], advance_turns=1)
+        if freq is not None:
+            # Count total player moves from authoritative state if available,
+            # falling back to counting player public messages.
+            auth_state = state.game_state.custom.get("authoritative_state", {})
+            auth_delta = state.game_state.custom.get("authoritative_delta", {})
+
+            # Sunk ship → always narrate
+            sunk = auth_delta.get("sunk_ship") if auth_delta else None
+            winner = auth_state.get("winner") if auth_state else None
+            is_draw = auth_state.get("is_draw", False) if auth_state else False
+
+            if sunk or winner or is_draw:
+                narrator_due = True
+            else:
+                # Count total shots / moves from authoritative history if present
+                attack_history = auth_state.get("attack_history", {})
+                if attack_history:
+                    total_moves = sum(len(h) for h in attack_history.values())
+                else:
+                    # Fallback: count player public messages
+                    player_ids = {p.id for p in players}
+                    total_moves = sum(
+                        1 for e in public_msgs if e.agent_id in player_ids
+                    )
+                narrator_due = total_moves > 0 and total_moves % freq == 0
+
+        if narrator_due:
+            log.info(
+                "orchestrator.decision",
+                reason="narrator_turn",
+                trigger="after_player",
+                next_agents=[narrator.id],
+                turn=turn,
+            )
+            return OrchestratorOutput(next_agents=[narrator.id], advance_turns=1)
 
     # ----------------------------------------------------------------
     # Narrator just spoke (or no narrator / narrator timed out) →

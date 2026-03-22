@@ -190,6 +190,18 @@ class GameConfig(BaseModel):
     hitl_compatible: bool = True
     max_rounds: int | None = None
     moderation: GameModerationConfig = Field(default_factory=GameModerationConfig)
+    narrator_frequency: int | None = None
+    """Call narrator every N player moves. None = every move (default). Also always
+    calls narrator when the authoritative delta contains a non-null 'sunk_ship' field."""
+
+    journal_format: Literal["xml", "text"] = "xml"
+    """Move journal format sent to players each turn.
+
+    "xml"  — structured XML with named elements; LLMs can match coordinate names
+             without spatial reasoning (recommended for most models).
+    "text" — compact token list (e.g. "E5:miss  B5:miss ..."); useful for testing
+             whether a model can track state from unstructured text.
+    """
 
     @model_validator(mode="after")
     def validate_authority_mode(self) -> "GameConfig":

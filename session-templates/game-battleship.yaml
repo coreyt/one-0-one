@@ -36,6 +36,7 @@ game:
   turn_order: engine-driven
   win_condition: "First to sink all five enemy ships wins."
   max_rounds: 100
+  narrator_frequency: 5
 
 channels:
   - id: public

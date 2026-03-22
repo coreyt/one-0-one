@@ -46,7 +46,7 @@ orchestrator:
 agents:
   - id: referee
     name: "Referee"
-    provider: anthropic
+    provider: openai
     model: openai/claude-sonnet
     routing_mode: airlock_routed
     role: moderator
@@ -65,9 +65,8 @@ agents:
 
   - id: player_red
     name: "Red"
-    provider: anthropic
-    model: openai/claude-haiku
-    routing_mode: airlock_routed
+    provider: openai
+    model: gpt-4o
     role: player
     monologue: false
     persona: >
@@ -86,9 +85,8 @@ agents:
 
   - id: player_black
     name: "Black"
-    provider: anthropic
-    model: openai/claude-haiku
-    routing_mode: airlock_routed
+    provider: openai
+    model: gpt-4o-mini
     role: player
     monologue: false
     persona: >
