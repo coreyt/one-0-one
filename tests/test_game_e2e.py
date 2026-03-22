@@ -152,7 +152,10 @@ def _battleship_config(tmp_path: Path, *, max_turns: int = 40) -> SessionConfig:
 
 
 async def test_session_runner_e2e_moderated_connect_four_writes_transcripts_and_monologue(tmp_path):
-    config = _connect_four_llm_config(tmp_path, max_turns=3, monologue=True)
+    # max_turns=2: turn 0 (player_red rejected+retry, referee narration), turn 1 (player_black).
+    # The session ends at max_turns before the second referee narration, so exactly 4 provider
+    # calls are made and the session exits cleanly rather than exhausting the stub.
+    config = _connect_four_llm_config(tmp_path, max_turns=2, monologue=True)
     bus = EventBus()
     runtime = _build_moderated_runtime()
     responses = [
@@ -184,6 +187,7 @@ async def test_session_runner_e2e_moderated_connect_four_writes_transcripts_and_
             engine = SessionEngine(config, bus)
             state = await engine.run()
 
+    assert state.end_reason == "max_turns", f"session ended dirty: {state.end_reason}"
     assert state.game_state.custom["authoritative_state"]["board"][5][3] == "R"
     assert state.game_state.custom["authoritative_state"]["board"][5][4] == "B"
     assert any(event.type == "MONOLOGUE" for event in state.events)

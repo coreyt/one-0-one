@@ -5,12 +5,26 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import litellm
 
 from src.logging import get_logger
 from src.providers.litellm_client import LiteLLMClient
 from src.settings import settings
 
 log = get_logger(__name__)
+
+
+def _apply_litellm_alias_map(model_ids: list[str]) -> None:
+    """Register bare Airlock model aliases in litellm.model_alias_map.
+
+    Maps each plain alias (e.g. 'claude-haiku') to 'openai/<alias>' so
+    litellm's provider detection routes it to the configured api_base
+    (Airlock) without requiring a provider prefix in the model string.
+    Already-prefixed IDs (containing '/') are skipped.
+    """
+    for model_id in model_ids:
+        if "/" not in model_id:
+            litellm.model_alias_map.setdefault(model_id, f"openai/{model_id}")
 
 
 def _cache_path() -> Path:
@@ -76,4 +90,5 @@ def refresh_airlock_model_ids(*, timeout: float = 3.0) -> list[str]:
         _write_cached_airlock_model_ids(model_ids)
     except Exception as exc:
         log.warning("airlock.models_cache_write_failed", path=str(_cache_path()), error=str(exc))
+    _apply_litellm_alias_map(model_ids)
     return model_ids

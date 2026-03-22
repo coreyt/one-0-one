@@ -46,6 +46,11 @@ if TYPE_CHECKING:
 
 log = get_logger(__name__)
 
+# Guard against recursive LiteLLMClient construction during alias-map refresh.
+# refresh_airlock_model_ids() creates a LiteLLMClient internally; without this
+# the "empty cache → live fetch" path would recurse indefinitely.
+_alias_refresh_in_progress = False
+
 # Push provider API keys into os.environ so LiteLLM can find them in direct mode.
 # pydantic-settings reads .env into model fields but doesn't write back to os.environ.
 def _sync_api_keys() -> None:
@@ -243,6 +248,30 @@ class LiteLLMClient:
             if self._airlock_client and not os.environ.get("AIRLOCK_CLIENT"):
                 os.environ["AIRLOCK_CLIENT"] = self._airlock_client
             litellm.api_base = self._router_url
+            # Apply Airlock model aliases so bare names (e.g. 'claude-haiku') resolve
+            # through litellm's alias map without a provider prefix.
+            # Lazy import avoids the circular dependency with model_catalog.
+            global _alias_refresh_in_progress
+            try:
+                from src.providers.model_catalog import (  # noqa: PLC0415
+                    _apply_litellm_alias_map,
+                    load_cached_airlock_model_ids,
+                    refresh_airlock_model_ids,
+                )
+                cached = load_cached_airlock_model_ids()
+                if cached:
+                    _apply_litellm_alias_map(cached)
+                elif not _alias_refresh_in_progress:
+                    # Cache empty (first-ever run) — do a live fetch.
+                    # Set guard so the LiteLLMClient() created inside
+                    # refresh_airlock_model_ids() doesn't recurse.
+                    _alias_refresh_in_progress = True
+                    try:
+                        refresh_airlock_model_ids()
+                    finally:
+                        _alias_refresh_in_progress = False
+            except Exception:
+                pass
 
     @property
     def uses_router(self) -> bool:
