@@ -141,6 +141,7 @@ def render_mp3(
     output_path: Path | None = None,
     channels: list[str] | None = None,
     seed: int | None = None,
+    radio_format: bool = True,
 ) -> Path:
     """
     Generate a single MP3 audio file from a session transcript.
@@ -152,6 +153,11 @@ def render_mp3(
         channels:        Which channels to include (default: ["public"]).
         seed:            Random seed for voice assignment. Defaults to seconds
                          since 2000-01-01 UTC (same convention as personas).
+        radio_format:    When True (default), use the radio script compiler to
+                         produce a curated dramatic script — JSON payloads,
+                         duplicative monologues, and bleed are filtered out,
+                         and phase-transition narration headers are injected.
+                         Set False to use the raw public channel messages only.
 
     Returns:
         Path to the written MP3 file.
@@ -175,12 +181,27 @@ def render_mp3(
     transcript = json.loads(transcript_path.read_text(encoding="utf-8"))
 
     # --- Build ordered script ---
-    script = build_script(transcript, channels=channels)
-    if not script:
-        raise ValueError(
-            f"No speakable messages found in '{transcript_path.name}' "
-            f"for channels: {channels}"
-        )
+    if radio_format:
+        from src.tts.script_compiler import compile_radio_script
+        radio_lines = compile_radio_script(transcript, channels=channels)
+        if not radio_lines:
+            raise ValueError(
+                f"No speakable lines found in '{transcript_path.name}' after radio compilation."
+            )
+        # Convert RadioLine objects to the (agent_id, agent_name, text) tuple format
+        # used by _render_dialogue / _render_per_turn.
+        # Prefer tts_text (eleven_v3 annotated) when available.
+        script = [
+            (line.agent_id, line.speaker, line.tts_text or line.text)
+            for line in radio_lines
+        ]
+    else:
+        script = build_script(transcript, channels=channels)
+        if not script:
+            raise ValueError(
+                f"No speakable messages found in '{transcript_path.name}' "
+                f"for channels: {channels}"
+            )
 
     # --- Determine which agents actually speak (ordered, unique) ---
     seen: dict[str, str] = {}  # agent_id → agent_name (first occurrence)
@@ -194,8 +215,8 @@ def render_mp3(
         if agent_id in agents_map:
             speaking_agents.append(agents_map[agent_id])
         else:
-            # e.g. hitl messages — synthesize with a fallback entry
-            speaking_agents.append({"id": agent_id, "name": seen[agent_id], "role": "participant"})
+            # Synthetic entries: narrator headers, hitl messages, game_engine overrides.
+            speaking_agents.append({"id": agent_id, "name": seen[agent_id], "role": "narrator"})
 
     # --- Resolve seed ---
     if seed is None:

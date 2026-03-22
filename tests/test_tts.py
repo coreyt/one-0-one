@@ -275,7 +275,7 @@ class TestRenderMp3:
         )
         client = _fake_client([_fake_voice(f"v{i}", f"Voice{i}") for i in range(10)])
         with patch("src.tts.renderer._make_client", return_value=client):
-            with pytest.raises(ValueError, match="No speakable messages"):
+            with pytest.raises(ValueError, match="No speakable"):
                 render_mp3(transcript, tmp_path / "out.mp3", seed=42)
 
     def test_only_speaking_agents_get_voices(self, tmp_path):

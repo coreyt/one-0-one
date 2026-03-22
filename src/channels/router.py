@@ -51,7 +51,11 @@ Untagged text is always treated as a public message.
 """
 
 _MONOLOGUE_PROMPT = """
-Before responding, briefly show your reasoning inside <thinking>...</thinking> tags.
+Before responding, capture ONE internal thought inside <thinking>…</thinking> tags.
+Rules:
+- Maximum one sentence.
+- React emotionally or strategically to ONE thing — never summarise game state.
+- Never restate what you are about to say publicly.
 Your thinking is only visible to the session observer — never to other agents.
 """
 
