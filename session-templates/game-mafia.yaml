@@ -19,6 +19,7 @@ game:
     - "Players may claim, conceal, or lie about their role during discussion."
     - "WIN - Town: All Mafia members eliminated."
     - "WIN - Mafia: Mafia count equals or exceeds Town count."
+    - "TIE-BREAK (Mafia kill vote): If Mafia kill votes tie, the Don's chosen target is eliminated."
   how_to_play: >
     Roles are secret and enforced by the engine.
     NIGHT: Living Mafia discuss on the mafia channel, then submit structured kill votes.
@@ -95,6 +96,8 @@ agents:
       My goal is to survive and eliminate the town. By day I appear innocent, steer
       suspicion toward others, and protect my allies without being obvious. I lie
       freely about my role and night actions.
+
+      I have tiebreaker authority — if Mafia kill votes tie, my chosen target is the one eliminated.
 
       At night I coordinate with my team on the mafia channel to choose a target.
 

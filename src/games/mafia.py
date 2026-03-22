@@ -20,6 +20,7 @@ from src.games.contracts import (
     ValidationResult,
     VisibleGameState,
 )
+from src.games.renderers import JournalEntry, render_journal_text, render_journal_xml
 
 if TYPE_CHECKING:
     from src.session.config import AgentConfig, GameConfig
@@ -66,6 +67,7 @@ class MafiaState(GameStateBase):
     current_vote_order: list[str] = Field(default_factory=list)
     vote_index: int = 0
     last_public_summary: dict[str, Any] | None = None
+    round_log: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class MafiaGame:
@@ -329,6 +331,9 @@ class MafiaGame:
             )
 
         my_actions = self.legal_actions(state, viewer_id)
+        journal_format = config.journal_format if config is not None else "xml"
+        journal_entries = self._build_journal_entries(state, viewer_id)
+        journal_fn = render_journal_text if journal_format == "text" else render_journal_xml
         common_state = [
             f"phase={phase}",
             f"round_number={payload.get('round_number')}",
@@ -336,6 +341,8 @@ class MafiaGame:
             f"visible_state={json.dumps(payload)}",
             f"legal_actions={json.dumps([a.model_dump() for a in my_actions])}",
         ]
+        if journal_entries:
+            common_state.append(journal_fn(journal_entries))
 
         if my_actions:
             _action_schemas: dict[str, tuple[str, str]] = {
@@ -535,6 +542,15 @@ class MafiaGame:
                 "eliminated_id": None,
             }
 
+        next_state.round_log.append({
+            "round": state.round_number,
+            "event_type": "day_result",
+            "eliminated_id": eliminated,
+            "eliminated_name": next_state.player_names[eliminated] if eliminated else None,
+            "role": next_state.roles[eliminated] if eliminated else None,
+            "no_majority": eliminated is None,
+        })
+
         winner = self._winning_faction(next_state)
         if winner is not None:
             self._apply_winner(next_state, winner)
@@ -583,6 +599,14 @@ class MafiaGame:
             "killed_name": next_state.player_names[killed] if killed else None,
             "saved": killed is None and next_state.night_kill_target is not None and protected == next_state.night_kill_target,
         }
+        next_state.round_log.append({
+            "round": state.round_number,
+            "event_type": "night_result",
+            "killed_id": killed,
+            "killed_name": next_state.player_names[killed] if killed else None,
+            "role": next_state.roles[killed] if killed else None,
+            "saved": next_state.last_public_summary["saved"],
+        })
         next_state.night_mafia_votes = {}
         next_state.night_kill_target = None
         next_state.day_votes = {}
@@ -606,6 +630,52 @@ class MafiaGame:
                 "winner": next_state.winner,
             },
         )
+
+    def _build_journal_entries(self, state: MafiaState, viewer_id: str) -> list[JournalEntry]:
+        entries: list[JournalEntry] = []
+        for entry in state.round_log:
+            if entry["event_type"] == "night_result":
+                details: dict[str, str] = {}
+                if entry.get("killed_name"):
+                    details["victim"] = entry["killed_name"]
+                    if entry.get("role"):
+                        details["role"] = entry["role"]
+                if entry.get("saved"):
+                    result = "saved"
+                elif entry.get("killed_id"):
+                    result = "killed"
+                else:
+                    result = "no_kill"
+                entries.append(JournalEntry(
+                    turn=entry["round"],
+                    actor_id="night",
+                    action_type="night_result",
+                    details=details,
+                    result=result,
+                ))
+            elif entry["event_type"] == "day_result":
+                details = {}
+                if entry.get("eliminated_name"):
+                    details["eliminated"] = entry["eliminated_name"]
+                    if entry.get("role"):
+                        details["role"] = entry["role"]
+                result = "no_majority" if entry.get("no_majority") else "eliminated"
+                entries.append(JournalEntry(
+                    turn=entry["round"],
+                    actor_id="day",
+                    action_type="day_vote",
+                    details=details,
+                    result=result,
+                ))
+        if viewer_id == state.detective_id:
+            for dr in state.detective_results:
+                entries.append(JournalEntry(
+                    turn=int(dr["round_number"]),
+                    actor_id=viewer_id,
+                    action_type="investigation",
+                    details={"target": dr["target_name"], "alignment": dr["alignment"]},
+                ))
+        return entries
 
     def _legal_targets_for_phase(self, state: MafiaState, actor_id: str) -> list[str]:
         living_others = [player_id for player_id in state.alive_players if player_id != actor_id]

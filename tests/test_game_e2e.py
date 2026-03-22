@@ -508,3 +508,220 @@ async def test_session_runner_e2e_deterministic_mafia_runs_night_day_and_reaches
         for event in payload["events"]
     )
     assert any(event["type"] == "SESSION_END" and event["reason"] == "win_condition" for event in payload["events"])
+
+
+async def test_session_runner_e2e_deterministic_mafia_mafia_wins(tmp_path):
+    """Mafia wins when their count equals or exceeds town after a night kill."""
+    config = SessionConfig(
+        title="Mafia Win E2E",
+        description="Mafia win condition end to end",
+        type="games",
+        setting="game",
+        topic="Play Mafia.",
+        agents=[
+            AgentConfig(id="moderator", name="Narrator", provider="anthropic", model="m", role="moderator"),
+            AgentConfig(id="mafia_don", name="Don Corvo", provider="openai", model="m", role="mafia", team="mafia"),
+            AgentConfig(id="mafia_soldier", name="Sal Bricks", provider="google", model="m", role="mafia", team="mafia"),
+            AgentConfig(id="mafia_consigliere", name="Luca Moretti", provider="anthropic", model="m", role="mafia", team="mafia"),
+            AgentConfig(id="detective", name="Iris Sharp", provider="anthropic", model="m", role="detective"),
+            AgentConfig(id="doctor", name="Dante Mend", provider="openai", model="m", role="doctor"),
+            AgentConfig(id="villager_1", name="Rosa Fields", provider="google", model="m", role="villager"),
+            AgentConfig(id="villager_2", name="Marco Stone", provider="anthropic", model="m", role="villager"),
+            AgentConfig(id="villager_3", name="Cleo Vance", provider="openai", model="m", role="villager"),
+            AgentConfig(id="villager_4", name="Reed Cole", provider="google", model="m", role="villager"),
+        ],
+        channels=[ChannelConfig(id="mafia", type="team", members=["mafia_don", "mafia_soldier", "mafia_consigliere"])],
+        game=GameConfig(plugin="mafia", name="Mafia"),
+        orchestrator=OrchestratorConfig(type="python", module="turn_based"),
+        hitl=HITLConfig(enabled=False),
+        transcript=TranscriptConfig(auto_save=True, format="both", path=tmp_path),
+        max_turns=20,
+    )
+    bus = EventBus()
+
+    runtime = GameRuntime.from_session_config(config)
+    # End-game scenario: 3 alive — mafia_don, doctor, villager_1.
+    # Mafia kills doctor (unprotected). After: mafia=1, town=1 → mafia wins.
+    runtime.state.phase = "night_mafia_discussion"
+    runtime.state.round_number = 1
+    runtime.state.alive_players = ["mafia_don", "doctor", "villager_1"]
+    runtime.state.eliminated = ["mafia_soldier", "mafia_consigliere", "detective", "villager_2", "villager_3", "villager_4"]
+    runtime.state.revealed_roles = {
+        "mafia_soldier": "mafia",
+        "mafia_consigliere": "mafia",
+        "detective": "detective",
+        "villager_2": "villager",
+        "villager_3": "villager",
+        "villager_4": "villager",
+    }
+    runtime.state.discussion_order = ["mafia_don"]
+    runtime.state.discussion_index = 0
+    runtime.state.current_vote_order = ["mafia_don"]
+    runtime.state.vote_index = 0
+
+    responses = [
+        CompletionResult(
+            text="<team>Take the doctor out tonight.</team>",
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+            model="player-model",
+        ),
+        CompletionResult(
+            text='{"target": "doctor"}',
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+            model="player-model",
+            parsed_action={"target": "doctor"},
+        ),
+        CompletionResult(
+            text='{"protect": "villager_1"}',
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+            model="player-model",
+            parsed_action={"protect": "villager_1"},
+        ),
+        CompletionResult(
+            text="The wolves have taken control. Ravenhollow falls to darkness.",
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+            model="narrator-model",
+        ),
+    ]
+
+    with patch("src.session.engine.GameRuntime.from_session_config", return_value=runtime):
+        with patch("src.session.engine.LiteLLMClient") as MockClient:
+            MockClient.return_value.complete = AsyncMock(side_effect=responses)
+            engine = SessionEngine(config, bus)
+            state = await engine.run()
+
+    assert state.end_reason == "win_condition"
+    authoritative = state.game_state.custom["authoritative_state"]
+    assert authoritative["winner"] == "mafia"
+    assert "doctor" in authoritative["eliminated"]
+    transcripts = sorted(tmp_path.glob("*.json"))
+    assert transcripts
+    payload = json.loads(transcripts[0].read_text(encoding="utf-8"))
+    assert any(event["type"] == "SESSION_END" and event["reason"] == "win_condition" for event in payload["events"])
+
+
+async def test_session_runner_e2e_deterministic_mafia_no_majority_day_vote(tmp_path):
+    """Day vote with no strict majority produces no elimination, then mafia wins the following night."""
+    config = SessionConfig(
+        title="Mafia No-Majority E2E",
+        description="No-majority day vote end to end",
+        type="games",
+        setting="game",
+        topic="Play Mafia.",
+        agents=[
+            AgentConfig(id="moderator", name="Narrator", provider="anthropic", model="m", role="moderator"),
+            AgentConfig(id="mafia_don", name="Don Corvo", provider="openai", model="m", role="mafia", team="mafia"),
+            AgentConfig(id="mafia_soldier", name="Sal Bricks", provider="google", model="m", role="mafia", team="mafia"),
+            AgentConfig(id="mafia_consigliere", name="Luca Moretti", provider="anthropic", model="m", role="mafia", team="mafia"),
+            AgentConfig(id="detective", name="Iris Sharp", provider="anthropic", model="m", role="detective"),
+            AgentConfig(id="doctor", name="Dante Mend", provider="openai", model="m", role="doctor"),
+            AgentConfig(id="villager_1", name="Rosa Fields", provider="google", model="m", role="villager"),
+            AgentConfig(id="villager_2", name="Marco Stone", provider="anthropic", model="m", role="villager"),
+            AgentConfig(id="villager_3", name="Cleo Vance", provider="openai", model="m", role="villager"),
+            AgentConfig(id="villager_4", name="Reed Cole", provider="google", model="m", role="villager"),
+        ],
+        channels=[ChannelConfig(id="mafia", type="team", members=["mafia_don", "mafia_soldier", "mafia_consigliere"])],
+        game=GameConfig(plugin="mafia", name="Mafia"),
+        orchestrator=OrchestratorConfig(type="python", module="turn_based"),
+        hitl=HITLConfig(enabled=False),
+        transcript=TranscriptConfig(auto_save=True, format="both", path=tmp_path),
+        max_turns=20,
+    )
+    bus = EventBus()
+
+    runtime = GameRuntime.from_session_config(config)
+    # Seed: 3 alive (mafia_don, doctor, villager_1), day_vote phase.
+    # 3-way vote split → no strict majority (need 2+) → no elimination.
+    # Then night: mafia kills villager_1 (unprotected) → alive=[mafia_don, doctor] → mafia wins.
+    runtime.state.phase = "day_vote"
+    runtime.state.round_number = 1
+    runtime.state.alive_players = ["mafia_don", "doctor", "villager_1"]
+    runtime.state.eliminated = ["mafia_soldier", "mafia_consigliere", "detective", "villager_2", "villager_3", "villager_4"]
+    runtime.state.revealed_roles = {
+        "mafia_soldier": "mafia",
+        "mafia_consigliere": "mafia",
+        "detective": "detective",
+        "villager_2": "villager",
+        "villager_3": "villager",
+        "villager_4": "villager",
+    }
+    runtime.state.current_vote_order = ["mafia_don", "doctor", "villager_1"]
+    runtime.state.vote_index = 0
+    runtime.state.day_votes = {}
+
+    # Votes: mafia_don→villager_1, doctor→mafia_don, villager_1→doctor
+    # Tally: villager_1=1, mafia_don=1, doctor=1 → top=1 < majority=2 → no elimination.
+    responses = [
+        CompletionResult(
+            text='{"vote_for": "villager_1"}',
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+            model="player-model",
+            parsed_action={"vote_for": "villager_1"},
+        ),
+        CompletionResult(
+            text='{"vote_for": "mafia_don"}',
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+            model="player-model",
+            parsed_action={"vote_for": "mafia_don"},
+        ),
+        CompletionResult(
+            text='{"vote_for": "doctor"}',
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+            model="player-model",
+            parsed_action={"vote_for": "doctor"},
+        ),
+        # Narrator announces no majority
+        CompletionResult(
+            text="The town could not agree. No one is eliminated today.",
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+            model="narrator-model",
+        ),
+        # Night 2: mafia_don discusses alone
+        CompletionResult(
+            text="<team>Take villager_1 out tonight.</team>",
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+            model="player-model",
+        ),
+        # Mafia vote: target villager_1
+        CompletionResult(
+            text='{"target": "villager_1"}',
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+            model="player-model",
+            parsed_action={"target": "villager_1"},
+        ),
+        # Doctor protects self (no repeat restriction yet)
+        CompletionResult(
+            text='{"protect": "doctor"}',
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+            model="player-model",
+            parsed_action={"protect": "doctor"},
+        ),
+        # Narrator announces night result (villager_1 dies) and mafia win
+        CompletionResult(
+            text="The wolves have taken control. Ravenhollow falls.",
+            usage=TokenUsage(prompt_tokens=5, completion_tokens=5),
+            model="narrator-model",
+        ),
+    ]
+
+    with patch("src.session.engine.GameRuntime.from_session_config", return_value=runtime):
+        with patch("src.session.engine.LiteLLMClient") as MockClient:
+            MockClient.return_value.complete = AsyncMock(side_effect=responses)
+            engine = SessionEngine(config, bus)
+            state = await engine.run()
+
+    assert state.end_reason == "win_condition"
+    authoritative = state.game_state.custom["authoritative_state"]
+    assert authoritative["winner"] == "mafia"
+    # No one eliminated by the day vote (only villager_1 by the following night)
+    assert "villager_1" in authoritative["eliminated"]
+    transcripts = sorted(tmp_path.glob("*.json"))
+    assert transcripts
+    payload = json.loads(transcripts[0].read_text(encoding="utf-8"))
+    assert any(
+        event["type"] == "MESSAGE"
+        and event["agent_id"] == "game_engine"
+        and "no majority" in event["text"].lower()
+        for event in payload["events"]
+    )
+    assert any(event["type"] == "SESSION_END" and event["reason"] == "win_condition" for event in payload["events"])
