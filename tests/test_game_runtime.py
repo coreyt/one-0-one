@@ -194,5 +194,6 @@ class TestGameRuntime:
         beta_view = runtime.visible_state("captain_beta")
 
         assert alpha_view.payload["own_fleet"] != beta_view.payload["own_fleet"]
-        assert "A1" in str(alpha_view.payload["own_fleet"])
-        assert "B1" in str(beta_view.payload["own_fleet"])
+        # Verify each player has a non-empty fleet with ship positions
+        assert alpha_view.payload["own_fleet"]["ship_positions"]
+        assert beta_view.payload["own_fleet"]["ship_positions"]

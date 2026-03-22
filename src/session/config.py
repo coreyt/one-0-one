@@ -194,13 +194,16 @@ class GameConfig(BaseModel):
     """Call narrator every N player moves. None = every move (default). Also always
     calls narrator when the authoritative delta contains a non-null 'sunk_ship' field."""
 
-    journal_format: Literal["xml", "text"] = "xml"
+    journal_format: Literal["xml", "text", "board"] = "xml"
     """Move journal format sent to players each turn.
 
-    "xml"  — structured XML with named elements; LLMs can match coordinate names
-             without spatial reasoning (recommended for most models).
-    "text" — compact token list (e.g. "E5:miss  B5:miss ..."); useful for testing
-             whether a model can track state from unstructured text.
+    "xml"   — structured XML with named elements; LLMs can match field values by
+              name without spatial reasoning (recommended for most models).
+    "text"  — compact token list; useful for testing whether a model can track
+              state from unstructured text.
+    "board" — 2D visual representation; game-specific rendering (e.g. a Connect
+              Four grid or Battleship attack grid). Requires the game plugin to
+              implement a visual renderer.
     """
 
     @model_validator(mode="after")

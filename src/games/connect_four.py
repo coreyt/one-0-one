@@ -20,6 +20,7 @@ from src.games.contracts import (
     ValidationResult,
     VisibleGameState,
 )
+from src.games.renderers import JournalEntry, render_journal_text, render_journal_xml
 
 if TYPE_CHECKING:
     from src.session.config import AgentConfig, GameConfig
@@ -71,6 +72,7 @@ class ConnectFourState(GameStateBase):
     is_draw: bool = False
     move_count: int = 0
     last_move: dict[str, Any] | None = None
+    move_history: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ConnectFourGame:
@@ -232,6 +234,15 @@ class ConnectFourGame:
         move_count = state.move_count + 1
         is_draw = winner is None and move_count == state.rows * state.columns
 
+        result = "win" if winner else "draw" if is_draw else "playing"
+        move_entry: dict[str, Any] = {
+            "turn": state.turn_index + 1,
+            "actor_id": actor_id,
+            "column": column + 1,
+            "row": row,
+            "disc": disc,
+            "result": result,
+        }
         next_state = state.model_copy(
             update={
                 "board": next_board,
@@ -252,6 +263,7 @@ class ConnectFourGame:
                     "row": row,
                     "disc": disc,
                 },
+                "move_history": [*state.move_history, move_entry],
             }
         )
 
@@ -303,8 +315,6 @@ class ConnectFourGame:
     ) -> AgentGameContext:
         viewer = self.visible_state(state, viewer_id)
         payload = viewer.payload
-        board = payload.get("board", [])
-        rendered_board = render_connect_four_board(board, bordered=False, empty_cell=".")
         active_player = payload.get("active_player")
 
         if role == "moderator":
@@ -312,6 +322,9 @@ class ConnectFourGame:
             player_actions = self.legal_actions(state, active_player) if active_player else []
             open_cols = (
                 player_actions[0].input_schema.get("column", []) if player_actions else []
+            )
+            rendered_board = render_connect_four_board(
+                payload.get("board", []), bordered=False, empty_cell="."
             )
             return AgentGameContext(
                 instructions=[
@@ -332,9 +345,10 @@ class ConnectFourGame:
             )
 
         my_actions = self.legal_actions(state, viewer_id)
-        open_cols = (
-            my_actions[0].input_schema.get("column", []) if my_actions else []
-        )
+        open_cols = my_actions[0].input_schema.get("column", []) if my_actions else []
+        journal_format = config.journal_format if config is not None else "board"
+        journal_lines = self._render_journal(state, journal_format)
+
         return AgentGameContext(
             instructions=[
                 "Any extra narration or identity talk may be ignored or rejected.",
@@ -345,12 +359,42 @@ class ConnectFourGame:
                 f"is_draw={payload.get('is_draw')}",
                 f"move_count={payload.get('move_count')}",
                 f"legal_columns={json.dumps(open_cols)}",
-                "board:",
-                rendered_board,
+                *journal_lines,
             ],
             response_schema='{"column": <integer 1-7>}',
             response_example='{"column": 4}',
         )
+
+    def _render_journal(self, state: ConnectFourState, journal_format: str) -> list[str]:
+        """Return journal lines for the given format.
+
+        "board" delegates to the game's own visual renderer (game-specific).
+        "xml" and "text" use the shared generic renderers from src.games.renderers.
+        """
+        if journal_format == "board":
+            return [
+                "board:",
+                render_connect_four_board(state.board, bordered=False, empty_cell="."),
+            ]
+        entries = self._build_journal_entries(state)
+        if journal_format == "text":
+            return [render_journal_text(entries)]
+        # Default: xml
+        return [render_journal_xml(entries)]
+
+    @staticmethod
+    def _build_journal_entries(state: ConnectFourState) -> list[JournalEntry]:
+        """Map move_history records to generic JournalEntry objects."""
+        return [
+            JournalEntry(
+                turn=m["turn"],
+                actor_id=m["actor_id"],
+                action_type="drop_disc",
+                details={"column": str(m["column"]), "disc": m["disc"]},
+                result=m.get("result"),
+            )
+            for m in state.move_history
+        ]
 
     def parse_action_text(self, text: str) -> GameAction | None:
         match = _COLUMN_RE.search(text)

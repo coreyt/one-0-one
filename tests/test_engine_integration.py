@@ -198,6 +198,20 @@ def _make_structured_result(column: int, *, text: str | None = None) -> Completi
     )
 
 
+def _flatten_content(content: object) -> str:
+    """Extract a plain string from either a plain string or Anthropic list-format content.
+
+    Anthropic messages use ``{"content": [{"type": "text", "text": "...", ...}]}``
+    rather than ``{"content": "..."}`` so any helper that joins message contents
+    must handle both forms.
+    """
+    if isinstance(content, list):
+        return " ".join(
+            block.get("text", "") for block in content if isinstance(block, dict)
+        )
+    return str(content) if content is not None else ""
+
+
 def _setup_event_capture(bus: EventBus) -> list:
     """
     Patch bus.emit to synchronously append events to a list.
@@ -632,7 +646,7 @@ class TestMessageRouting:
         async def complete_side_effect(**kwargs):
             messages = kwargs["messages"]
             combined = "\n".join(
-                message.get("content", "")
+                _flatten_content(message.get("content", ""))
                 for message in messages
                 if isinstance(message, dict)
             )
@@ -735,16 +749,19 @@ class TestMessageRouting:
 
         assert len(captured_messages) >= 1
         system_contents = [
-            message["content"]
+            _flatten_content(message["content"])
             for message in captured_messages[0]
             if message.get("role") == "system"
         ]
         assert any(content.startswith("[Authoritative game view]") for content in system_contents)
         assert not any(content.startswith("[Game state update]") for content in system_contents)
-        combined = "\n".join(m["content"] for m in captured_messages[0] if "content" in m)
+        combined = "\n".join(
+            _flatten_content(m["content"]) for m in captured_messages[0] if "content" in m
+        )
         assert "active_player" in combined
         assert "player_red" in combined
-        assert "drop_disc" in combined
+        # legal_columns is how the player-context communicates available moves
+        assert "legal_columns" in combined
         assert "column" in combined
 
     async def test_plugin_game_context_uses_authoritative_view_without_legacy_game_state_dump(self):

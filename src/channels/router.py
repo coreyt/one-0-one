@@ -207,12 +207,21 @@ class ChannelRouter:
             and self._config.game.authority_mode == "engine_authoritative"
         )
         if is_engine_auth and agent.role != "moderator":
-            # Players: journal only — no chat history needed.
+            # Players: journal only — no full chat history needed.
+            # Rule violation events targeting this agent must still reach them
+            # so the agent can correct its response on the retry turn.
+            violation_count = 0
+            for event in state.events:
+                if event.type == "RULE_VIOLATION" and event.agent_id == agent_id:
+                    msg = self._event_to_message(event, agent_id)
+                    if msg is not None:
+                        messages.append(msg)
+                        violation_count += 1
             log.debug(
                 "channel.context_built",
                 agent_id=agent_id,
                 total_events=len(state.events),
-                visible_events=0,
+                visible_events=violation_count,
                 mode="journal_only",
             )
             return messages
