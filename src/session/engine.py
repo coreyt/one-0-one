@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -76,6 +77,12 @@ if TYPE_CHECKING:
     pass
 
 log = get_logger(__name__)
+
+# Compiled patterns used by _extract_structured_action to tolerate common
+# LLM formatting quirks when the expected response is a bare JSON object.
+_CODE_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+_THINKING_STRIP_RE = re.compile(r"<thinking>.*?</thinking>|<thinking>", re.DOTALL | re.IGNORECASE)
+_FLAT_JSON_RE = re.compile(r"\{[^{}]*\}")
 
 # Maximum retries for a rule-violating agent before skipping their turn
 _MAX_VIOLATION_RETRIES = 2
@@ -1072,12 +1079,38 @@ class SessionEngine:
         candidates: list[object] = []
         if result is not None and result.parsed_action is not None:
             candidates.append(result.parsed_action)
-        stripped = public_text.strip()
-        if stripped.startswith("{") and stripped.endswith("}"):
+
+        text = public_text.strip()
+
+        # Strategy 1: bare JSON object (fast path, most common)
+        if text.startswith("{") and text.endswith("}"):
             try:
-                candidates.append(json.loads(stripped))
+                candidates.append(json.loads(text))
             except json.JSONDecodeError:
                 pass
+
+        # Strategy 2: JSON inside a markdown code fence (```json...```)
+        # Handles models (e.g. Haiku) that wrap action JSON in code fences.
+        fence_m = _CODE_FENCE_RE.search(text)
+        if fence_m:
+            try:
+                candidates.append(json.loads(fence_m.group(1).strip()))
+            except json.JSONDecodeError:
+                pass
+
+        # Strategy 3: scan for flat JSON objects anywhere in the text.
+        # Handles models (e.g. Gemini Flash) that prepend a <thinking> block
+        # or other preamble without a closing tag so the parser can't strip it.
+        # Try matches in reverse order so the last occurrence (the actual action)
+        # is preferred over any JSON-like fragments that appear in preamble text.
+        if not candidates:
+            cleaned = _THINKING_STRIP_RE.sub("", text).strip()
+            for m in reversed(list(_FLAT_JSON_RE.finditer(cleaned))):
+                try:
+                    candidates.append(json.loads(m.group()))
+                except json.JSONDecodeError:
+                    pass
+
         for candidate in candidates:
             if isinstance(candidate, dict):
                 return candidate
