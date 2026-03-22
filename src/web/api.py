@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -159,7 +159,7 @@ async def list_models() -> list[str]:
 @router.post("/sessions", response_model=SessionStarted, status_code=201)
 async def start_session(config_data: dict) -> SessionStarted:
     config = SessionConfig.model_validate(config_data)
-    active = session_manager.start(config)
+    active = await session_manager.start(config)
     return SessionStarted(session_id=active.session_id)
 
 
@@ -242,6 +242,54 @@ async def session_stream(session_id: str, request: Request) -> StreamingResponse
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# WebSocket audio stream (near real-time TTS)
+# ──────────────────────────────────────────────────────────────────────────────
+
+@router.websocket("/sessions/{session_id}/audio-ws")
+async def audio_stream_ws(websocket: WebSocket, session_id: str) -> None:
+    """
+    WebSocket endpoint — streams ElevenLabs MP3 audio chunks in near real-time
+    as agents speak during a live session.
+
+    Requires TTS_ENABLED=true and ELEVEN_LABS_API_KEY in the server environment.
+    If the session has no TTS streamer (TTS disabled or init failed), closes
+    with code 1011 (internal error).
+
+    Client usage (JavaScript):
+
+        const ws = new WebSocket(`ws://…/api/sessions/${id}/audio-ws`);
+        const mediaSource = new MediaSource();
+        audio.src = URL.createObjectURL(mediaSource);
+        mediaSource.addEventListener('sourceopen', () => {
+            const sb = mediaSource.addSourceBuffer('audio/mpeg');
+            ws.binaryType = 'arraybuffer';
+            ws.onmessage = e => sb.appendBuffer(e.data);
+            ws.onclose = () => mediaSource.endOfStream();
+        });
+    """
+    active = session_manager.get(session_id)
+    if active is None or active.streamer is None:
+        await websocket.close(code=1011)
+        return
+
+    await websocket.accept()
+    audio_q = active.streamer.add_audio_subscriber()
+    log.info("tts.ws_connected", session_id=session_id)
+
+    try:
+        while True:
+            chunk = await audio_q.get()
+            if chunk is None:          # session ended — streamer sent sentinel
+                break
+            await websocket.send_bytes(chunk)
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
+        active.streamer.remove_audio_subscriber(audio_q)
+        log.info("tts.ws_disconnected", session_id=session_id)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

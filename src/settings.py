@@ -19,6 +19,8 @@ class Settings(BaseSettings):
 
     # TTS provider API keys
     eleven_labs_api_key: str = ""
+    tts_enabled: bool = False
+    tts_streaming_model: str = "eleven_flash_v2_5"
 
     # Local LiteLLM router (airlock). Leave empty to call providers directly.
     litellm_router_url: str = ""

@@ -47,6 +47,8 @@ class AgentConfig(BaseModel):
     """Reference a named profile in personas/roster.yaml."""
     personality: PersonalityProfile | None = None
     """Inline personality profile. Takes priority over personality_id if both are set."""
+    voice_id: str | None = None
+    """Optional ElevenLabs voice_id override. Bypasses persona-aware matching."""
     airlock_metadata: dict[str, Any] = Field(default_factory=dict)
 
     def requested_model(self, *, use_airlock: bool) -> str:
